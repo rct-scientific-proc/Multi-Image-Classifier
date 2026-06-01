@@ -24,9 +24,8 @@ class ConsolePanel(QWidget):
 
     def append_message(self, msg: str):
         self._text.appendPlainText(msg)
-        self._text.verticalScrollBar().setValue(
-            self._text.verticalScrollBar().maximum()
-        )
+        sb = self._text.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def clear(self):
         self._text.clear()

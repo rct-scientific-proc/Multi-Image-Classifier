@@ -134,7 +134,10 @@ class SettingsPanel(QWidget):
         self._focal_gamma.setRange(0.0, 10.0)
         self._focal_gamma.setSingleStep(0.5)
         self._focal_gamma.setValue(2.0)
-        self._focal_gamma.setToolTip("Focal loss focusing parameter γ (ignored for CrossEntropy)")
+        self._focal_gamma.setToolTip(
+            "Focal loss focusing parameter γ.  γ=0 reduces to standard cross-entropy.  "
+            "Typical value is 2 for imbalanced classes."
+        )
         train_lay.addRow("Focal γ:", self._focal_gamma)
         self._loss_fn.currentTextChanged.connect(
             lambda t: self._focal_gamma.setEnabled(t == "FocalLoss")

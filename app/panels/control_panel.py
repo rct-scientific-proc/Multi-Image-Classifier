@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -62,6 +63,7 @@ class TrainingWorker(QThread):
 
     def run(self) -> None:
         s = self._s
+        logger: ExperimentLogger | None = None
         try:
             self.sig_log.emit(f"Loading dataset: {s['h5_path']}")
             train_ds = H5Dataset(s["h5_path"], split=SPLIT_TRAIN)
@@ -79,6 +81,7 @@ class TrainingWorker(QThread):
                 shuffle=True, num_workers=s["num_workers"], pin_memory=pin,
             )
             val_loader = make_dataloader(
+                # 2× batch in val is safe: no gradients, no backward pass memory
                 val_ds, batch_size=s["batch_size"] * 2,
                 shuffle=False, num_workers=s["num_workers"], pin_memory=pin,
             )
@@ -152,11 +155,15 @@ class TrainingWorker(QThread):
                 hyperparams=s,
                 start_epoch=start_epoch,
             )
-            logger.close()
 
         except Exception:
             self.sig_error.emit(traceback.format_exc())
         finally:
+            if logger is not None:
+                try:
+                    logger.close()
+                except Exception:
+                    pass
             self.sig_finished.emit()
 
 
@@ -204,6 +211,7 @@ class ControlPanel(QWidget):
     sig_log_message       = pyqtSignal(str)
     sig_epoch_complete    = pyqtSignal(dict)
     sig_batch_complete    = pyqtSignal(dict)
+    sig_training_started  = pyqtSignal(dict)   # emits settings dict
     sig_training_finished = pyqtSignal()
     sig_checkpoint_saved  = pyqtSignal(str)
 
@@ -248,8 +256,9 @@ class ControlPanel(QWidget):
         if self._worker and self._worker.isRunning():
             return
         settings = self._settings.get_settings()
-        if not settings.get("h5_path"):
-            self.sig_log_message.emit("[ERROR] No H5 dataset path set in Settings.")
+        error = self._validate_settings(settings)
+        if error:
+            QMessageBox.warning(self, "Cannot start training", error)
             return
 
         self._worker = TrainingWorker(settings)
@@ -264,7 +273,23 @@ class ControlPanel(QWidget):
         self._btn_pause.setEnabled(True)
         self._btn_stop.setEnabled(True)
         self._batch_bar.setValue(0)
+        self.sig_training_started.emit(settings)
         self._worker.start()
+
+    @staticmethod
+    def _validate_settings(s: dict) -> str:
+        """Return an error string if settings are invalid, else empty string."""
+        h5 = s.get("h5_path", "").strip()
+        if not h5:
+            return "No H5 dataset path set in Settings."
+        if not os.path.isfile(h5):
+            return f"H5 dataset not found:\n{h5}"
+        if not s.get("experiment_name", "").strip():
+            return "Experiment name cannot be empty."
+        resume = s.get("resume_checkpoint", "").strip()
+        if resume and not os.path.isfile(resume):
+            return f"Resume checkpoint not found:\n{resume}"
+        return ""
 
     def _on_pause(self) -> None:
         if self._worker is None:
@@ -311,3 +336,6 @@ class ControlPanel(QWidget):
 
     def _on_error(self, tb: str) -> None:
         self.sig_log_message.emit(f"[ERROR]\n{tb}")
+        # Show concise error popup; full traceback stays in console
+        first_line = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
+        QMessageBox.critical(self, "Training error", first_line)

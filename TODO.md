@@ -72,10 +72,18 @@ is involved, so you can validate the core logic independently.
 - [x] `cleanup()` called from `MainWindow.closeEvent` — terminates subprocess cleanly on app exit
 
 ## Phase 11 — Polish
-- [ ] Status bar: current epoch, ETA, last checkpoint saved
-- [ ] Error handling: invalid H5 path, CUDA OOM, missing deps — show `QMessageBox`
-- [ ] Dark/light theme toggle
-- [ ] Package entry point in `pyproject.toml` / `setup.cfg`
+- [x] Status bar: shows epoch + metric + training-started / training-complete state
+- [x] Error handling: invalid H5 path, missing resume checkpoint, empty experiment name → `QMessageBox.warning`
+- [x] Training exceptions show concise `QMessageBox.critical` (full traceback still in console)
+- [x] Logger resource leak fixed (try/finally in worker)
+- [x] TensorBoard exe path resolution fixed (`os.path.dirname` instead of brittle string replace)
+- [x] TensorBoard stderr captured and shown in status label on unexpected exit
+- [x] Best checkpoint marker (★) identified by reading `best.pt` epoch field, not filesize coincidence
+- [x] TensorBoard panel configured once per training run, not on every log message
+- [x] Console scrollbar reference cached
+- [x] Improved tooltips (focal γ); proper type hint on `Trainer.scheduler`
+- [x] Entry point already packaged in `pyproject.toml` (`image-classifier`)
+- [ ] Dark/light theme toggle (deferred — Qt default theme is fine for now)
 
 ---
 

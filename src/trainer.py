@@ -70,7 +70,7 @@ class Trainer:
         self,
         model: nn.Module,
         optimizer: torch.optim.Optimizer,
-        scheduler,                          # LR scheduler or None
+        scheduler: torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None,
         train_loader: DataLoader,
         val_loader: DataLoader,
         device: str = "cpu",

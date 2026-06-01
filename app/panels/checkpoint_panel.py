@@ -93,10 +93,24 @@ class CheckpointPanel(QWidget):
         files = sorted(ck_path.glob("epoch_*.pt"), key=lambda p: p.stat().st_mtime)
         best  = ck_path / "best.pt"
 
+        # Determine which epoch_*.pt corresponds to best.pt by reading its epoch field
+        best_epoch: int | None = None
+        if best.exists():
+            try:
+                meta = torch.load(best, weights_only=True, map_location="cpu")
+                best_epoch = meta.get("epoch")
+            except Exception:
+                best_epoch = None
+
         for f in files:
             item = QListWidgetItem(f.name)
             item.setData(Qt.UserRole, str(f))
-            if best.exists() and f.stat().st_size == best.stat().st_size:
+            # Filenames are epoch_{epoch:03d}_acc..., parse the leading epoch number
+            try:
+                epoch_in_name = int(f.name.split("_")[1])
+            except (IndexError, ValueError):
+                epoch_in_name = None
+            if best_epoch is not None and epoch_in_name == best_epoch:
                 item.setText(f"★ {f.name}")
             self._list.addItem(item)
 

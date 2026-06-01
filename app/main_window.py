@@ -76,8 +76,8 @@ class MainWindow(QMainWindow):
         # ---- Wire checkpoint panel signals ----
         self.checkpoint_panel.sig_resume_requested.connect(self._on_resume_requested)
 
-        # ---- Auto-configure TensorBoard from settings when training starts ----
-        self.control_panel.sig_log_message.connect(self._maybe_configure_tb)
+        # ---- TensorBoard panel: configure once per training run ----
+        self.control_panel.sig_training_started.connect(self._on_training_started)
 
         # ---- Configure TB panel from persisted settings at startup ----
         _s = self.settings_panel.get_settings()
@@ -101,13 +101,12 @@ class MainWindow(QMainWindow):
         self.settings_panel._resume_edit.setText(path)
         self.console_panel.append_message(f"[INFO] Resume checkpoint set: {path}")
 
-    def _maybe_configure_tb(self, msg: str) -> None:
-        """Sync TB panel settings whenever a log message arrives (cheap)."""
-        s = self.settings_panel.get_settings()
+    def _on_training_started(self, settings: dict) -> None:
         self.tensorboard_panel.configure(
-            log_dir=s.get("log_dir", "runs"),
-            port=s.get("tensorboard_port", 6006),
+            log_dir=settings.get("log_dir", "runs"),
+            port=settings.get("tensorboard_port", 6006),
         )
+        self._status.showMessage("Training started…")
 
     def closeEvent(self, event):
         self.settings_panel.save_settings()
