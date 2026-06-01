@@ -11,9 +11,9 @@ is involved, so you can validate the core logic independently.
 - [x] Verify a batch loads correctly and channel dim is right (1 vs 3)
 
 ## Phase 2 — Model
-- [ ] `src/model.py` — define a baseline CNN (or thin wrapper around a torchvision backbone)
-- [ ] Model accepts configurable `in_channels` (1 or 3) and `num_classes`
-- [ ] Verify a forward pass runs on a sample batch
+- [x] `src/model.py` — define a baseline CNN (or thin wrapper around a torchvision backbone)
+- [x] Model accepts configurable `in_channels` (1 or 3) and `num_classes`
+- [x] Verify a forward pass runs on a sample batch
 
 ## Phase 3 — Training engine (no GUI)
 - [ ] `src/trainer.py` — `Trainer` class with `train_one_epoch()` and `validate()` methods
