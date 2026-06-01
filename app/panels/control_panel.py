@@ -131,6 +131,7 @@ class TrainingWorker(QThread):
                 cancel_event=cancel_ev,
                 target_metric=s["target_metric"],
                 logger=logger,
+                keep_last=int(s.get("keep_last", 3)),
             )
 
             self.sig_log.emit(

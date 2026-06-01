@@ -8,6 +8,8 @@ or via the project entry point:
 """
 
 import sys
+# torch must be imported before PyQt5 on Windows to avoid DLL init failure
+import torch  # noqa: F401
 from PyQt5.QtWidgets import QApplication
 from app.main_window import MainWindow
 

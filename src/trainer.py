@@ -48,6 +48,7 @@ class Trainer:
         cancel_event: threading.Event | None = None,
         target_metric: str = DEFAULT_TARGET_METRIC,
         logger: "ExperimentLogger | None" = None,
+        keep_last: int = 3,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -62,6 +63,7 @@ class Trainer:
         self._num_classes  = len(train_loader.dataset.classes)
         self.target_metric = target_metric
         self.logger        = logger
+        self.keep_last     = keep_last
         self._class_names  = list(train_loader.dataset.classes)
 
     # ------------------------------------------------------------------
@@ -160,6 +162,7 @@ class Trainer:
                 scheduler=self.scheduler,
                 metrics=val_metrics,
                 hyperparams=hyperparams,
+                keep_last=self.keep_last,
             )
 
             if self.logger is not None:

@@ -52,6 +52,7 @@ _DEFAULTS: dict = {
     "experiment_name":  "experiment",
     "tensorboard_port": 6006,
     "num_workers":      0,
+    "keep_last":        3,
 }
 
 
@@ -134,6 +135,12 @@ class SettingsPanel(QWidget):
         self._num_workers.setRange(0, 32)
         self._num_workers.setValue(0)
         train_lay.addRow("DataLoader workers:", self._num_workers)
+
+        self._keep_last = QSpinBox()
+        self._keep_last.setRange(1, 100)
+        self._keep_last.setValue(3)
+        self._keep_last.setToolTip("Number of recent epoch checkpoints to keep on disk (best.pt is always kept)")
+        train_lay.addRow("Keep last N checkpoints:", self._keep_last)
 
         self._target_metric = QComboBox()
         self._target_metric.addItems(TARGET_METRICS)
@@ -243,6 +250,7 @@ class SettingsPanel(QWidget):
         self._batch_size.setValue(int(s.get("batch_size", 32)))
         self._epochs.setValue(int(s.get("epochs", 10)))
         self._num_workers.setValue(int(s.get("num_workers", 0)))
+        self._keep_last.setValue(int(s.get("keep_last", 3)))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
         self._target_metric.setCurrentIndex(max(0, idx))
         device_data = s.get("device", "cpu")
@@ -269,6 +277,7 @@ class SettingsPanel(QWidget):
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),
             "num_workers":      self._num_workers.value(),
+            "keep_last":        self._keep_last.value(),
             "target_metric":    self._target_metric.currentText(),
             "device":           self._device.currentData(),
             "checkpoint_dir":   self._checkpoint_dir.text().strip(),
