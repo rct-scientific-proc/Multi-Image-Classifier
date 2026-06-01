@@ -5,6 +5,7 @@ Control panel — Start / Pause / Stop buttons + QThread training worker.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import traceback
 
@@ -76,14 +77,22 @@ class TrainingWorker(QThread):
             )
 
             pin = bool(s.get("pin_memory", False))
+            nw  = int(s.get("num_workers", 0))
+            if nw > 0 and sys.platform == "win32" and str(s.get("device", "")).startswith("cuda"):
+                self.sig_log.emit(
+                    f"[WARN] num_workers={nw} on Windows+CUDA spawns worker processes "
+                    f"that each re-import torch and load CUDA DLLs (~1 GB committed memory "
+                    f"per worker). If you hit 'WinError 1455 (paging file too small)', "
+                    f"set num_workers=0 or increase the Windows page file."
+                )
             train_loader = make_dataloader(
                 train_ds, batch_size=s["batch_size"],
-                shuffle=True, num_workers=s["num_workers"], pin_memory=pin,
+                shuffle=True, num_workers=nw, pin_memory=pin,
             )
             val_loader = make_dataloader(
                 # 2× batch in val is safe: no gradients, no backward pass memory
                 val_ds, batch_size=s["batch_size"] * 2,
-                shuffle=False, num_workers=s["num_workers"], pin_memory=pin,
+                shuffle=False, num_workers=nw, pin_memory=pin,
             )
 
             self.sig_log.emit(f"Building model: {s['backbone']}")
@@ -352,6 +361,21 @@ class ControlPanel(QWidget):
 
     def _on_error(self, tb: str) -> None:
         self.sig_log_message.emit(f"[ERROR]\n{tb}")
-        # Show concise error popup; full traceback stays in console
+        # Detect the most common Windows pitfall and give actionable advice
+        if "WinError 1455" in tb or "paging file is too small" in tb:
+            QMessageBox.critical(
+                self,
+                "Out of virtual memory (WinError 1455)",
+                "Windows ran out of page-file space while a DataLoader worker tried "
+                "to load the CUDA DLLs.\n\n"
+                "Fix one of:\n"
+                "  • Set 'DataLoader workers' to 0 in Settings (recommended).\n"
+                "  • Increase the Windows page file size "
+                "(System Properties → Advanced → Performance → Virtual memory).\n\n"
+                "Each worker process re-imports torch and commits ~1 GB; with several "
+                "workers + a small page file this exceeds Windows' commit limit."
+            )
+            return
+        # Generic fallback: show last line of the traceback
         first_line = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
         QMessageBox.critical(self, "Training error", first_line)

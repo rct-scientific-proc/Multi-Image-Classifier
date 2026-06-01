@@ -165,6 +165,12 @@ class SettingsPanel(QWidget):
         self._num_workers = QSpinBox()
         self._num_workers.setRange(0, 32)
         self._num_workers.setValue(0)
+        self._num_workers.setToolTip(
+            "Number of DataLoader worker processes.\n"
+            "On Windows + CUDA, set to 0: each worker re-imports torch and "
+            "commits ~1 GB of virtual memory for the CUDA DLLs, which often "
+            "exceeds the default Windows page-file size (WinError 1455)."
+        )
         train_lay.addRow("DataLoader workers:", self._num_workers)
 
         self._pin_memory = QCheckBox("Pin memory (faster CPU→GPU transfer)")
