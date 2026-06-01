@@ -33,14 +33,15 @@ is involved, so you can validate the core logic independently.
 - [x] Decide layout: left panel = settings, center = training log/plots, right = controls
 
 ## Phase 6 — Settings panel
-- [ ] `app/panels/settings_panel.py` — widgets for:
-  - H5 file path (QLineEdit + browse button)
-  - Model backbone selector (QComboBox)
-  - Learning rate, batch size, epochs (QDoubleSpinBox / QSpinBox)
-  - Optimizer choice (Adam, SGD, etc.)
-  - Checkpoint output directory
-  - TensorBoard log directory
-- [ ] Serialize/deserialize settings to JSON so they persist between sessions
+- [x] `app/panels/settings_panel.py` — widgets for:
+  - H5 file path (QLineEdit + browse button), in_channels
+  - Model backbone selector (QComboBox), pretrained checkbox (disabled for simple_cnn)
+  - Learning rate, batch size, epochs, num_workers (QDoubleSpinBox / QSpinBox)
+  - Optimizer choice (Adam, AdamW, SGD, RMSprop)
+  - Target metric dropdown (all TARGET_METRICS), device combo (auto-detects CUDA GPUs)
+  - Checkpoint output directory, TensorBoard log directory, experiment name, TB port
+- [x] `get_settings() -> dict` public API for Phase 7
+- [x] Serialize/deserialize settings to JSON (app-data folder, auto-save on close)
 
 ## Phase 7 — Training controls
 - [ ] `app/panels/control_panel.py` — Start / Pause / Stop buttons
