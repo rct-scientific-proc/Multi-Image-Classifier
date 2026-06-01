@@ -28,9 +28,9 @@ is involved, so you can validate the core logic independently.
 - [x] Log hyperparameters with `writer.add_hparams()`
 
 ## Phase 5 — PyQt5 app skeleton
-- [ ] `app/main.py` — entry point; `QApplication` + show main window
-- [ ] `app/main_window.py` — `QMainWindow` with dockable panels and a central widget placeholder
-- [ ] Decide layout: left panel = settings, center = training log/plots, right = controls
+- [x] `app/main.py` — entry point; `QApplication` + show main window
+- [x] `app/main_window.py` — `QMainWindow` with dockable panels and a central widget placeholder
+- [x] Decide layout: left panel = settings, center = training log/plots, right = controls
 
 ## Phase 6 — Settings panel
 - [ ] `app/panels/settings_panel.py` — widgets for:
