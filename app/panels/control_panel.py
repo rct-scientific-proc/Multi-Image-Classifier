@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN, SPLIT_VALIDATE
+from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
 from src.model import build_model
 from src.trainer import Trainer
@@ -137,10 +138,20 @@ class TrainingWorker(QThread):
             self.sig_log.emit(
                 f"Starting training — {s['epochs']} epochs on {s['device']}"
             )
+
+            start_epoch = 0
+            resume_path = s.get("resume_checkpoint", "").strip()
+            if resume_path:
+                self.sig_log.emit(f"Resuming from: {resume_path}")
+                ckpt = load_checkpoint(resume_path, model, optimizer, scheduler)
+                start_epoch = ckpt.get("epoch", 0) + 1
+                self.sig_log.emit(f"  Resuming at epoch {start_epoch}")
+
             trainer.fit(
                 epochs=s["epochs"],
                 checkpoint_dir=ck_dir,
                 hyperparams=s,
+                start_epoch=start_epoch,
             )
             logger.close()
 

@@ -38,6 +38,7 @@ _SETTINGS_FILE = os.path.join(
 
 _DEFAULTS: dict = {
     "h5_path":          "",
+    "resume_checkpoint": "",
     "backbone":         "simple_cnn",
     "in_channels":      1,
     "lr":               1e-3,
@@ -161,6 +162,26 @@ class SettingsPanel(QWidget):
 
         form.addRow(train_box)
 
+        # ── Resume ───────────────────────────────────────────────────────
+        resume_box = QGroupBox("Resume from checkpoint (optional)")
+        resume_lay = QFormLayout(resume_box)
+
+        self._resume_edit = QLineEdit()
+        self._resume_edit.setPlaceholderText("Leave blank to start fresh")
+        btn_browse_resume = QPushButton("Browse…")
+        btn_browse_resume.clicked.connect(self._browse_resume)
+        btn_clear_resume = QPushButton("✕")
+        btn_clear_resume.setFixedWidth(28)
+        btn_clear_resume.setToolTip("Clear — start from scratch")
+        btn_clear_resume.clicked.connect(lambda: self._resume_edit.clear())
+        resume_row = QHBoxLayout()
+        resume_row.addWidget(self._resume_edit)
+        resume_row.addWidget(btn_browse_resume)
+        resume_row.addWidget(btn_clear_resume)
+        resume_lay.addRow("Checkpoint file:", resume_row)
+
+        form.addRow(resume_box)
+
         # ── Directories ───────────────────────────────────────────────────
         dir_box = QGroupBox("Directories & Logging")
         dir_lay = QFormLayout(dir_box)
@@ -216,6 +237,15 @@ class SettingsPanel(QWidget):
         if path:
             self._h5_edit.setText(path)
 
+    def _browse_resume(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select checkpoint to resume from",
+            self._checkpoint_dir.text(),
+            "PyTorch checkpoint (*.pt);;All files (*)"
+        )
+        if path:
+            self._resume_edit.setText(path)
+
     def _browse_dir(self, line_edit: QLineEdit) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select directory", line_edit.text())
         if path:
@@ -258,6 +288,7 @@ class SettingsPanel(QWidget):
         if idx < 0:  # fall back: map bare "cuda" → first cuda entry
             idx = self._device.findData("cuda:0") if "cuda" in device_data else 0
         self._device.setCurrentIndex(max(0, idx))
+        self._resume_edit.setText(s.get("resume_checkpoint", ""))
         self._checkpoint_dir.setText(s.get("checkpoint_dir", "checkpoints"))
         self._log_dir.setText(s.get("log_dir", "runs"))
         self._experiment_name.setText(s.get("experiment_name", "experiment"))
@@ -280,6 +311,7 @@ class SettingsPanel(QWidget):
             "keep_last":        self._keep_last.value(),
             "target_metric":    self._target_metric.currentText(),
             "device":           self._device.currentData(),
+            "resume_checkpoint": self._resume_edit.text().strip(),
             "checkpoint_dir":   self._checkpoint_dir.text().strip(),
             "log_dir":          self._log_dir.text().strip(),
             "experiment_name":  self._experiment_name.text().strip(),

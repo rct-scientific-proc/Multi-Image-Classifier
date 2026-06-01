@@ -85,8 +85,8 @@ class MainWindow(QMainWindow):
         self._status.showMessage("Training complete")
 
     def _on_resume_requested(self, path: str):
-        self.console_panel.append_message(f"[INFO] Resume from: {path}")
-        self._status.showMessage(f"Resume checkpoint: {path}")
+        self.settings_panel._resume_edit.setText(path)
+        self.console_panel.append_message(f"[INFO] Resume checkpoint set: {path}")
 
     def closeEvent(self, event):
         self.settings_panel.save_settings()
