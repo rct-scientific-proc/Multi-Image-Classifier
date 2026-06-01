@@ -146,6 +146,7 @@ class TrainingWorker(QThread):
                 keep_last=int(s.get("keep_last", 3)),
                 criterion=_build_criterion(s),
                 recall_targets=_parse_recall_targets(s.get("recall_targets", "")),
+                use_amp=bool(s.get("use_amp", False)),
             )
 
             self.sig_log.emit(

@@ -57,6 +57,7 @@ _DEFAULTS: dict = {
     "tensorboard_port": 6006,
     "num_workers":      0,
     "pin_memory":       torch.cuda.is_available(),
+    "use_amp":          torch.cuda.is_available(),
     "shuffle_every_n_epochs": 1,
     "keep_last":        3,
     "recall_targets":   "0.95, 0.99",
@@ -182,6 +183,15 @@ class SettingsPanel(QWidget):
         )
         train_lay.addRow("", self._pin_memory)
 
+        self._use_amp = QCheckBox("Mixed precision (fp16 autocast)")
+        self._use_amp.setChecked(torch.cuda.is_available())
+        self._use_amp.setToolTip(
+            "Use automatic mixed precision (torch.cuda.amp) during training and validation.\n"
+            "Typically 1.5–3× faster and ~40% less GPU memory on Tensor Core GPUs\n"
+            "(Volta/Turing/Ampere/Ada). Silently disabled on CPU."
+        )
+        train_lay.addRow("", self._use_amp)
+
         self._shuffle_every = QSpinBox()
         self._shuffle_every.setRange(0, 9999)
         self._shuffle_every.setValue(1)
@@ -300,6 +310,9 @@ class SettingsPanel(QWidget):
         self._pin_memory.setEnabled(is_gpu)
         if not is_gpu:
             self._pin_memory.setChecked(False)
+        self._use_amp.setEnabled(is_gpu)
+        if not is_gpu:
+            self._use_amp.setChecked(False)
 
     def _browse_h5(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -361,6 +374,7 @@ class SettingsPanel(QWidget):
         self._shuffle_every.setValue(int(s.get("shuffle_every_n_epochs", 1)))
         self._recall_targets.setText(str(s.get("recall_targets", "0.95, 0.99")))
         self._pin_memory.setChecked(bool(s.get("pin_memory", torch.cuda.is_available())))
+        self._use_amp.setChecked(bool(s.get("use_amp", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
         self._target_metric.setCurrentIndex(max(0, idx))
         device_data = s.get("device", "cpu")
@@ -392,6 +406,7 @@ class SettingsPanel(QWidget):
             "epochs":           self._epochs.value(),
             "num_workers":      self._num_workers.value(),
             "pin_memory":       self._pin_memory.isChecked(),
+            "use_amp":          self._use_amp.isChecked(),
             "shuffle_every_n_epochs": self._shuffle_every.value(),
             "keep_last":        self._keep_last.value(),
             "recall_targets":   self._recall_targets.text().strip(),

@@ -94,7 +94,7 @@ class H5Dataset(Dataset):
         gt    = bool(f["gt"][h5_idx])
 
         # HDF5 stores (H, W, C); PyTorch expects (C, H, W)
-        image = torch.from_numpy(image.astype(np.float32) / 255.0)
+        image = torch.from_numpy(image.astype(np.float32) * (1.0 / 255.0))
         image = image.permute(2, 0, 1)       # (C, H, W)
 
         if self.transform is not None:

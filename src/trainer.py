@@ -82,6 +82,7 @@ class Trainer:
         keep_last: int = 3,
         criterion: nn.Module | None = None,
         recall_targets: list[float] | None = None,
+        use_amp: bool = False,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -99,6 +100,9 @@ class Trainer:
         self.keep_last     = keep_last
         self._class_names  = list(train_loader.dataset.classes)
         self.recall_targets = list(recall_targets) if recall_targets else []
+        # AMP is only meaningful on CUDA; silently disable elsewhere
+        self.use_amp       = bool(use_amp) and str(device).startswith("cuda")
+        self._scaler       = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
     # ------------------------------------------------------------------
     def train_one_epoch(self, epoch: int) -> dict:
@@ -113,10 +117,12 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad()
-            logits = self.model(images)
-            loss   = self.criterion(logits, labels)
-            loss.backward()
-            self.optimizer.step()
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                logits = self.model(images)
+                loss   = self.criterion(logits, labels)
+            self._scaler.scale(loss).backward()
+            self._scaler.step(self.optimizer)
+            self._scaler.update()
 
             tracker.update(logits.detach(), labels.detach(), loss.item())
 
@@ -141,8 +147,9 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            logits = self.model(images)
-            loss   = self.criterion(logits, labels)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                logits = self.model(images)
+                loss   = self.criterion(logits, labels)
             tracker.update(logits, labels, loss.item())
 
         return tracker.compute()
