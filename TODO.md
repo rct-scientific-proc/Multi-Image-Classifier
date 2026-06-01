@@ -16,11 +16,11 @@ is involved, so you can validate the core logic independently.
 - [x] Verify a forward pass runs on a sample batch
 
 ## Phase 3 — Training engine (no GUI)
-- [ ] `src/trainer.py` — `Trainer` class with `train_one_epoch()` and `validate()` methods
-- [ ] Emit metrics (loss, accuracy) via a callback / signal so the GUI can consume them later
-- [ ] Support clean stop via a `threading.Event` cancel token
-- [ ] `src/metrics.py` — track loss, per-class accuracy, confusion matrix per epoch
-- [ ] `src/checkpoints.py` — save/load checkpoint (model weights, optimizer state, epoch, metrics)
+- [x] `src/trainer.py` — `Trainer` class with `train_one_epoch()` and `validate()` methods
+- [x] Emit metrics (loss, accuracy) via a callback / signal so the GUI can consume them later
+- [x] Support clean stop via a `threading.Event` cancel token
+- [x] `src/metrics.py` — track loss, per-class accuracy, confusion matrix per epoch
+- [x] `src/checkpoints.py` — save/load checkpoint (model weights, optimizer state, epoch, metrics)
 
 ## Phase 4 — Logging
 - [ ] `src/logger.py` — TensorBoard `SummaryWriter` wrapper; log scalars, confusion matrix image
