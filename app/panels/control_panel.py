@@ -87,7 +87,8 @@ class TrainingWorker(QThread):
                 )
             train_loader = make_dataloader(
                 train_ds, batch_size=s["batch_size"],
-                shuffle=True, num_workers=nw, pin_memory=pin,
+                shuffle=True, shuffle_every=int(s.get("shuffle_every_n_epochs", 1)),
+                num_workers=nw, pin_memory=pin,
             )
             val_loader = make_dataloader(
                 # 2× batch in val is safe: no gradients, no backward pass memory

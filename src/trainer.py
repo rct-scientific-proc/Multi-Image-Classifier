@@ -165,6 +165,10 @@ class Trainer:
             if self.cancel_event.is_set():
                 break
 
+            sampler = self.train_loader.sampler
+            if hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(epoch)
+
             train_metrics = self.train_one_epoch(epoch)
             val_metrics   = self.validate(epoch)
 

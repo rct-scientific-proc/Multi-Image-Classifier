@@ -57,6 +57,7 @@ _DEFAULTS: dict = {
     "tensorboard_port": 6006,
     "num_workers":      0,
     "pin_memory":       torch.cuda.is_available(),
+    "shuffle_every_n_epochs": 1,
     "keep_last":        3,
     "recall_targets":   "0.95, 0.99",
 }
@@ -180,6 +181,15 @@ class SettingsPanel(QWidget):
             "Only beneficial when training on a CUDA GPU."
         )
         train_lay.addRow("", self._pin_memory)
+
+        self._shuffle_every = QSpinBox()
+        self._shuffle_every.setRange(0, 9999)
+        self._shuffle_every.setValue(1)
+        self._shuffle_every.setToolTip(
+            "How often (in epochs) to re-shuffle the training data.\n"
+            "1 = every epoch (default), N = every N epochs, 0 = never shuffle."
+        )
+        train_lay.addRow("Shuffle every N epochs:", self._shuffle_every)
 
         self._keep_last = QSpinBox()
         self._keep_last.setRange(1, 100)
@@ -348,6 +358,7 @@ class SettingsPanel(QWidget):
         self._epochs.setValue(int(s.get("epochs", 10)))
         self._num_workers.setValue(int(s.get("num_workers", 0)))
         self._keep_last.setValue(int(s.get("keep_last", 3)))
+        self._shuffle_every.setValue(int(s.get("shuffle_every_n_epochs", 1)))
         self._recall_targets.setText(str(s.get("recall_targets", "0.95, 0.99")))
         self._pin_memory.setChecked(bool(s.get("pin_memory", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
@@ -381,6 +392,7 @@ class SettingsPanel(QWidget):
             "epochs":           self._epochs.value(),
             "num_workers":      self._num_workers.value(),
             "pin_memory":       self._pin_memory.isChecked(),
+            "shuffle_every_n_epochs": self._shuffle_every.value(),
             "keep_last":        self._keep_last.value(),
             "recall_targets":   self._recall_targets.text().strip(),
             "target_metric":    self._target_metric.currentText(),

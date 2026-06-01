@@ -20,7 +20,7 @@ Usage:
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from torchvision import transforms
 
 
@@ -111,6 +111,48 @@ class H5Dataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# Sampler
+# ---------------------------------------------------------------------------
+
+class PeriodicShuffleSampler(Sampler):
+    """Shuffle training indices every *shuffle_every* epochs.
+
+    Parameters
+    ----------
+    dataset_size:
+        Total number of samples.
+    shuffle_every:
+        Re-shuffle the index permutation once every this many epochs.
+        ``1`` (default) reshuffles before every epoch.
+        ``0`` disables shuffling entirely (sequential order).
+    """
+
+    def __init__(self, dataset_size: int, shuffle_every: int = 1):
+        self._n     = dataset_size
+        self._every = max(0, int(shuffle_every))
+        self._epoch = 0
+        self._indices = list(range(dataset_size))
+        if self._every > 0:
+            self._reshuffle()
+
+    def _reshuffle(self) -> None:
+        perm = torch.randperm(self._n).tolist()
+        self._indices = perm
+
+    def set_epoch(self, epoch: int) -> None:
+        """Call before each epoch; reshuffles when ``epoch % shuffle_every == 0``."""
+        self._epoch = epoch
+        if self._every > 0 and epoch % self._every == 0:
+            self._reshuffle()
+
+    def __iter__(self):
+        return iter(self._indices)
+
+    def __len__(self) -> int:
+        return self._n
+
+
+# ---------------------------------------------------------------------------
 # DataLoader factory
 # ---------------------------------------------------------------------------
 
@@ -118,6 +160,7 @@ def make_dataloader(
     dataset: H5Dataset,
     batch_size: int = 32,
     shuffle: bool = False,
+    shuffle_every: int = 1,
     num_workers: int = 0,
     pin_memory: bool = True,
 ) -> DataLoader:
@@ -125,7 +168,21 @@ def make_dataloader(
 
     num_workers > 0 opens one HDF5 file handle per worker process.
     pin_memory speeds up CPU→GPU transfers when using CUDA.
+
+    When *shuffle* is True, *shuffle_every* controls how often the index
+    permutation is refreshed: 1 = every epoch (default), N = every N epochs,
+    0 = never shuffle (sequential order regardless of *shuffle*).
     """
+    if shuffle and shuffle_every != 1:
+        sampler = PeriodicShuffleSampler(len(dataset), shuffle_every)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
