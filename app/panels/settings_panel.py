@@ -58,6 +58,7 @@ _DEFAULTS: dict = {
     "num_workers":      0,
     "pin_memory":       torch.cuda.is_available(),
     "keep_last":        3,
+    "recall_targets":   "0.95, 0.99",
 }
 
 
@@ -184,6 +185,15 @@ class SettingsPanel(QWidget):
         self._target_metric.addItems(TARGET_METRICS)
         self._target_metric.setCurrentText(DEFAULT_TARGET_METRIC)
         train_lay.addRow("Target metric:", self._target_metric)
+
+        self._recall_targets = QLineEdit("0.95, 0.99")
+        self._recall_targets.setPlaceholderText("e.g. 0.90, 0.95, 0.99 — leave blank to disable")
+        self._recall_targets.setToolTip(
+            "Comma-separated target recall values in (0, 1]. For each value, the validation "
+            "epoch logs a per-class probability threshold (one-vs-rest) achieving that recall, "
+            "plus the resulting precision. Logged to TensorBoard under val/threshold@rX.XX/<class>."
+        )
+        train_lay.addRow("Recall targets:", self._recall_targets)
 
         self._device = QComboBox()
         self._device.addItem("CPU", "cpu")
@@ -332,6 +342,7 @@ class SettingsPanel(QWidget):
         self._epochs.setValue(int(s.get("epochs", 10)))
         self._num_workers.setValue(int(s.get("num_workers", 0)))
         self._keep_last.setValue(int(s.get("keep_last", 3)))
+        self._recall_targets.setText(str(s.get("recall_targets", "0.95, 0.99")))
         self._pin_memory.setChecked(bool(s.get("pin_memory", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
         self._target_metric.setCurrentIndex(max(0, idx))
@@ -365,6 +376,7 @@ class SettingsPanel(QWidget):
             "num_workers":      self._num_workers.value(),
             "pin_memory":       self._pin_memory.isChecked(),
             "keep_last":        self._keep_last.value(),
+            "recall_targets":   self._recall_targets.text().strip(),
             "target_metric":    self._target_metric.currentText(),
             "device":           self._device.currentData(),
             "resume_checkpoint": self._resume_edit.text().strip(),

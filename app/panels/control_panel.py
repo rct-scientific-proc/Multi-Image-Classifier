@@ -135,6 +135,7 @@ class TrainingWorker(QThread):
                 logger=logger,
                 keep_last=int(s.get("keep_last", 3)),
                 criterion=_build_criterion(s),
+                recall_targets=_parse_recall_targets(s.get("recall_targets", "")),
             )
 
             self.sig_log.emit(
@@ -203,6 +204,21 @@ def _build_criterion(s: dict) -> torch.nn.Module:
         gamma = float(s.get("focal_gamma", 2.0))
         return FocalLoss(gamma=gamma)
     return torch.nn.CrossEntropyLoss()
+
+
+def _parse_recall_targets(text: str) -> list[float]:
+    out: list[float] = []
+    for tok in (text or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if 0.0 < v <= 1.0:
+            out.append(v)
+    return sorted(set(out))
 
 
 # ── Panel ─────────────────────────────────────────────────────────────────────

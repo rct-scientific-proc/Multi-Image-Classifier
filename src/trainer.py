@@ -81,6 +81,7 @@ class Trainer:
         logger: "ExperimentLogger | None" = None,
         keep_last: int = 3,
         criterion: nn.Module | None = None,
+        recall_targets: list[float] | None = None,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -97,11 +98,12 @@ class Trainer:
         self.logger        = logger
         self.keep_last     = keep_last
         self._class_names  = list(train_loader.dataset.classes)
+        self.recall_targets = list(recall_targets) if recall_targets else []
 
     # ------------------------------------------------------------------
     def train_one_epoch(self, epoch: int) -> dict:
         self.model.train()
-        tracker = MetricTracker(self._num_classes)
+        tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
 
         for batch_idx, (images, labels, _gt) in enumerate(self.train_loader):
             if self.cancel_event.is_set():
@@ -133,7 +135,7 @@ class Trainer:
     @torch.no_grad()
     def validate(self, epoch: int) -> dict:
         self.model.eval()
-        tracker = MetricTracker(self._num_classes)
+        tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
 
         for images, labels, _gt in self.val_loader:
             images = images.to(self.device, non_blocking=True)

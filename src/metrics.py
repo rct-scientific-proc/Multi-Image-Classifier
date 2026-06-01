@@ -19,6 +19,9 @@ Available metrics (keys in the dict returned by compute()):
     per_class_accuracy    — list[float], one value per class
     per_class_specificity — list[float], one value per class
     per_class_auc         — list[float], one value per class (nan if class absent in epoch)
+    per_class_thresholds  — dict[str, list[dict]]: keyed by target recall (e.g. "0.99"),
+                            each entry per class has {threshold, precision, recall}.
+                            Only present when recall_targets is provided.
     confusion_matrix      — np.ndarray (num_classes, num_classes)
 
 Usage:
@@ -69,12 +72,44 @@ def _roc_auc_binary(labels_bin: np.ndarray, scores: np.ndarray) -> float:
     return float(np.trapezoid(tpr, fpr))
 
 
+def _threshold_at_recall(scores: np.ndarray, labels_bin: np.ndarray,
+                         target_recall: float) -> dict:
+    """Smallest probability threshold whose one-vs-rest recall ≥ target_recall.
+
+    Returns {threshold, precision, recall}. All NaN when the class has no
+    positive samples in this epoch.
+    """
+    n_pos = int(labels_bin.sum())
+    if n_pos == 0:
+        return {"threshold": float("nan"),
+                "precision": float("nan"),
+                "recall":    float("nan")}
+
+    order         = np.argsort(-scores, kind="stable")
+    scores_sorted = scores[order]
+    labels_sorted = labels_bin[order].astype(np.int64)
+    cum_tp        = np.cumsum(labels_sorted)
+
+    needed = int(np.ceil(target_recall * n_pos))
+    needed = max(1, min(needed, n_pos))
+    # First index where cum_tp reaches the needed positive count
+    k = int(np.searchsorted(cum_tp, needed, side="left"))
+    k = min(k, len(scores_sorted) - 1)
+
+    threshold = float(scores_sorted[k])
+    precision = float(cum_tp[k]) / float(k + 1)
+    recall    = float(cum_tp[k]) / float(n_pos)
+    return {"threshold": threshold, "precision": precision, "recall": recall}
+
+
 class MetricTracker:
     """Accumulates per-batch stats and computes epoch-level metrics."""
 
-    def __init__(self, num_classes: int):
-        self.num_classes = num_classes
-        self._top_k      = min(5, num_classes)
+    def __init__(self, num_classes: int, recall_targets: list[float] | None = None):
+        self.num_classes    = num_classes
+        self._top_k         = min(5, num_classes)
+        self.recall_targets = sorted({float(r) for r in (recall_targets or [])
+                                      if 0.0 < float(r) <= 1.0})
         self.reset()
 
     def reset(self):
@@ -190,6 +225,16 @@ class MetricTracker:
             for i in range(self.num_classes)
         ]
 
+        # ---- per-class probability thresholds at target recall(s) ----
+        per_class_thresholds: dict[str, list[dict]] = {}
+        for r in self.recall_targets:
+            key = f"{r:.2f}"
+            per_class_thresholds[key] = [
+                _threshold_at_recall(all_probs[:, c],
+                                     (all_labels == c).astype(np.int32), r)
+                for c in range(self.num_classes)
+            ]
+
         return {
             "avg_loss":             avg_loss,
             "accuracy":             accuracy,
@@ -208,6 +253,7 @@ class MetricTracker:
             "per_class_accuracy":   per_class_accuracy,
             "per_class_specificity": list(specificity_c.tolist()),
             "per_class_auc":        per_class_auc,
+            "per_class_thresholds": per_class_thresholds,
             "confusion_matrix":     C.copy(),
         }
 
