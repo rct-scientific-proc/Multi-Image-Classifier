@@ -4,9 +4,12 @@ Checkpoint panel — list .pt checkpoints, resume from selected, export best.
 
 from __future__ import annotations
 
+import json
+import math
 import shutil
 from pathlib import Path
 
+import numpy as np
 import torch
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -21,6 +24,33 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def _json_default(obj):
+    """Fallback for json.dump — handles types _to_jsonable misses."""
+    if isinstance(obj, torch.Tensor):
+        return _to_jsonable(obj.detach().cpu().tolist())
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serialisable")
+
+
+def _to_jsonable(obj):
+    """Recursively convert numpy / NaN / tensor values to JSON-safe primitives."""
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _to_jsonable(obj.tolist())
+    if isinstance(obj, torch.Tensor):
+        return _to_jsonable(obj.detach().cpu().tolist())
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    return obj
 
 
 class CheckpointPanel(QWidget):
@@ -57,17 +87,26 @@ class CheckpointPanel(QWidget):
         btn_row = QHBoxLayout()
         self._btn_resume = QPushButton("Resume from selected")
         self._btn_export = QPushButton("Export best…")
+        self._btn_export_metrics = QPushButton("Export metrics…")
         self._btn_refresh = QPushButton("↻")
         self._btn_refresh.setFixedWidth(32)
         self._btn_resume.setEnabled(False)
         self._btn_export.setEnabled(False)
+        self._btn_export_metrics.setEnabled(False)
+        self._btn_export_metrics.setToolTip(
+            "Export the full metrics dict (including per-class thresholds at "
+            "target recalls) of the selected checkpoint — or best.pt if none "
+            "selected — to a JSON file."
+        )
         btn_row.addWidget(self._btn_resume)
         btn_row.addWidget(self._btn_export)
+        btn_row.addWidget(self._btn_export_metrics)
         btn_row.addWidget(self._btn_refresh)
         box_lay.addLayout(btn_row)
 
         self._btn_resume.clicked.connect(self._on_resume)
         self._btn_export.clicked.connect(self._on_export)
+        self._btn_export_metrics.clicked.connect(self._on_export_metrics)
         self._btn_refresh.clicked.connect(lambda: self.refresh(self._ck_dir))
 
         outer = QVBoxLayout(self)
@@ -121,6 +160,7 @@ class CheckpointPanel(QWidget):
             self._info.setText("No epoch checkpoints found.")
 
         self._btn_export.setEnabled(best.exists())
+        self._btn_export_metrics.setEnabled(best.exists() or bool(files))
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -145,6 +185,47 @@ class CheckpointPanel(QWidget):
         if dst:
             shutil.copy2(best, dst)
             QMessageBox.information(self, "Export", f"Saved to:\n{dst}")
+
+    def _on_export_metrics(self) -> None:
+        # Prefer the selected checkpoint; fall back to best.pt.
+        items = self._list.selectedItems()
+        if items:
+            src = Path(items[0].data(Qt.UserRole))
+            default_name = src.stem + "_metrics.json"
+        else:
+            src = Path(self._ck_dir) / "best.pt"
+            default_name = "best_metrics.json"
+
+        if not src.exists():
+            QMessageBox.warning(self, "Export metrics", f"{src.name} not found.")
+            return
+
+        try:
+            ckpt = torch.load(src, weights_only=True, map_location="cpu")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export metrics", f"Failed to load checkpoint:\n{exc}")
+            return
+
+        payload = {
+            "source_checkpoint": str(src),
+            "epoch":             ckpt.get("epoch"),
+            "hyperparams":       ckpt.get("hyperparams", {}),
+            "metrics":           ckpt.get("metrics", {}),
+        }
+
+        dst, _ = QFileDialog.getSaveFileName(
+            self, "Export metrics to JSON", default_name, "JSON (*.json);;All files (*)"
+        )
+        if not dst:
+            return
+        try:
+            with open(dst, "w", encoding="utf-8") as f:
+                json.dump(_to_jsonable(payload), f, indent=2,
+                          default=_json_default, allow_nan=False)
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Export metrics", f"Write failed:\n{exc}")
+            return
+        QMessageBox.information(self, "Export metrics", f"Saved to:\n{dst}")
 
     def _on_inspect(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)
