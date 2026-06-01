@@ -16,6 +16,7 @@ from app.panels.settings_panel    import SettingsPanel
 from app.panels.control_panel     import ControlPanel
 from app.panels.console_panel     import ConsolePanel
 from app.panels.checkpoint_panel  import CheckpointPanel
+from app.panels.tensorboard_panel import TensorBoardPanel
 
 
 class MainWindow(QMainWindow):
@@ -47,6 +48,8 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.control_panel)
         right_layout.addWidget(self.checkpoint_panel)
+        self.tensorboard_panel = TensorBoardPanel()
+        right_layout.addWidget(self.tensorboard_panel)
         right_layout.addStretch()
 
         right_dock = QDockWidget("Controls", self)
@@ -73,6 +76,16 @@ class MainWindow(QMainWindow):
         # ---- Wire checkpoint panel signals ----
         self.checkpoint_panel.sig_resume_requested.connect(self._on_resume_requested)
 
+        # ---- Auto-configure TensorBoard from settings when training starts ----
+        self.control_panel.sig_log_message.connect(self._maybe_configure_tb)
+
+        # ---- Configure TB panel from persisted settings at startup ----
+        _s = self.settings_panel.get_settings()
+        self.tensorboard_panel.configure(
+            log_dir=_s.get("log_dir", "runs"),
+            port=_s.get("tensorboard_port", 6006),
+        )
+
     # ------------------------------------------------------------------
     def _on_epoch_complete(self, info: dict):
         self._status.showMessage(
@@ -88,6 +101,15 @@ class MainWindow(QMainWindow):
         self.settings_panel._resume_edit.setText(path)
         self.console_panel.append_message(f"[INFO] Resume checkpoint set: {path}")
 
+    def _maybe_configure_tb(self, msg: str) -> None:
+        """Sync TB panel settings whenever a log message arrives (cheap)."""
+        s = self.settings_panel.get_settings()
+        self.tensorboard_panel.configure(
+            log_dir=s.get("log_dir", "runs"),
+            port=s.get("tensorboard_port", 6006),
+        )
+
     def closeEvent(self, event):
         self.settings_panel.save_settings()
+        self.tensorboard_panel.cleanup()
         super().closeEvent(event)

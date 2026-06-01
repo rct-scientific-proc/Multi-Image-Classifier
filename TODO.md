@@ -64,10 +64,12 @@ is involved, so you can validate the core logic independently.
 - [x] Manual refresh button (↻)
 
 ## Phase 10 — TensorBoard integration
-- [ ] Add a configurable port setting (default `6006`) to the settings panel
-- [ ] Launch `tensorboard --logdir <dir> --port <port>` as a managed subprocess from the GUI
-- [ ] "Open TensorBoard" button calls `webbrowser.open(f"http://localhost:{port}")`)
-- [ ] Kill the subprocess cleanly on app exit
+- [x] Port setting already in settings panel (default `6006`)
+- [x] `app/panels/tensorboard_panel.py` — ▶ Start TB / ⏹ Stop TB / 🌐 Open in browser buttons
+- [x] Launches `tensorboard --logdir <dir> --port <port>` as a managed `subprocess.Popen`
+- [x] Polls every 2 s to detect unexpected exits; updates status label
+- [x] `configure(log_dir, port)` called at startup and on each training log message (stays in sync)
+- [x] `cleanup()` called from `MainWindow.closeEvent` — terminates subprocess cleanly on app exit
 
 ## Phase 11 — Polish
 - [ ] Status bar: current epoch, ETA, last checkpoint saved
