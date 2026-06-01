@@ -52,9 +52,9 @@ is involved, so you can validate the core logic independently.
 - [x] Settings auto-saved to JSON on window close (`MainWindow.closeEvent`)
 
 ## Phase 8 — Console output panel
-- [ ] `app/panels/console_panel.py` — read-only `QPlainTextEdit` for training output
-- [ ] Append a formatted line per epoch: `Epoch 012 | Train loss 0.0412 | Val loss 0.0398 | Val acc 92.31%`
-- [ ] Progress bar for current epoch (batch-level granularity)
+- [x] `app/panels/console_panel.py` — read-only `QPlainTextEdit` for training output, monospace font, auto-scroll
+- [x] Append a formatted line per epoch: `Epoch 012  train_loss=0.0412  val_loss=0.0398  f1_macro=0.9231  lr=1.00e-03`
+- [x] Progress bar for current epoch (batch-level granularity) — in `ControlPanel`
 
 ## Phase 9 — Checkpoint management
 - [x] `app/panels/checkpoint_panel.py` — lists `epoch_*.pt` files (★ marks best), auto-refreshes after each epoch
