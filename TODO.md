@@ -6,9 +6,9 @@ is involved, so you can validate the core logic independently.
 ---
 
 ## Phase 1 — Data layer
-- [ ] `src/dataset.py` — PyTorch `Dataset` wrapping the H5 file; respects `split` and `gt` filters
-- [ ] `src/dataset.py` — `DataLoader` factory (num_workers, pin_memory, shuffle per split)
-- [ ] Verify a batch loads correctly and channel dim is right (1 vs 3)
+- [x] `src/dataset.py` — PyTorch `Dataset` wrapping the H5 file; respects `split` and `gt` filters
+- [x] `src/dataset.py` — `DataLoader` factory (num_workers, pin_memory, shuffle per split)
+- [x] Verify a batch loads correctly and channel dim is right (1 vs 3)
 
 ## Phase 2 — Model
 - [ ] `src/model.py` — define a baseline CNN (or thin wrapper around a torchvision backbone)
