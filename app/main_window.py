@@ -80,3 +80,7 @@ class MainWindow(QMainWindow):
 
     def _on_training_finished(self):
         self._status.showMessage("Training complete")
+
+    def closeEvent(self, event):
+        self.settings_panel.save_settings()
+        super().closeEvent(event)

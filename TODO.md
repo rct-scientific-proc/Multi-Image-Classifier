@@ -44,9 +44,12 @@ is involved, so you can validate the core logic independently.
 - [x] Serialize/deserialize settings to JSON (app-data folder, auto-save on close)
 
 ## Phase 7 — Training controls
-- [ ] `app/panels/control_panel.py` — Start / Pause / Stop buttons
-- [ ] Run `Trainer` in a `QThread` worker so the GUI stays responsive
-- [ ] Worker emits Qt signals: `epoch_complete(dict)`, `batch_complete(dict)`, `finished()`, `error(str)`
+- [x] `app/panels/control_panel.py` — Start / Pause / Stop buttons with progress bar + epoch/metric labels
+- [x] `TrainingWorker(QThread)` — builds dataset, model, optimizer, scheduler, logger and runs `Trainer.fit()` in background
+- [x] Pause via `threading.Event` polled in `on_batch_end`; Stop via cancel token
+- [x] Worker emits: `sig_log`, `sig_epoch_end`, `sig_batch_end`, `sig_finished`, `sig_error`, `sig_checkpoint`
+- [x] `ControlPanel` bridges worker signals → panel-level `sig_*` signals consumed by `MainWindow`
+- [x] Settings auto-saved to JSON on window close (`MainWindow.closeEvent`)
 
 ## Phase 8 — Console output panel
 - [ ] `app/panels/console_panel.py` — read-only `QPlainTextEdit` for training output
