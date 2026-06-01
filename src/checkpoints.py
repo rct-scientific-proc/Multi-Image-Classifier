@@ -1,8 +1,8 @@
 """
 Checkpoints — save and load .pt checkpoint dicts.
 
-Naming convention: epoch_{epoch:03d}_val{val_accuracy:.4f}.pt
-A 'best.pt' symlink/copy is always kept for the highest val accuracy seen.
+Naming convention: epoch_{epoch:03d}_acc{val_accuracy:.4f}_{metric}{val:.4f}.pt
+A 'best.pt' copy is always kept for the best target-metric value seen.
 
 Usage:
     save_checkpoint(path, epoch, model, optimizer, scheduler, metrics, hyperparams)
@@ -15,9 +15,27 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+# Metrics where a lower value is better (everything else is maximised).
+_MINIMISE = {"avg_loss"}
 
-def checkpoint_name(epoch: int, val_accuracy: float) -> str:
-    return f"epoch_{epoch:03d}_val{val_accuracy:.4f}.pt"
+
+def _is_better(new_val: float, old_val: float, metric: str) -> bool:
+    if metric in _MINIMISE:
+        return new_val <= old_val
+    return new_val >= old_val
+
+
+def checkpoint_name(
+    epoch: int,
+    val_accuracy: float,
+    target_metric: str = "accuracy",
+    target_val: float | None = None,
+) -> str:
+    # Sanitise metric name: keep alphanumerics + underscore only
+    safe = "".join(c if c.isalnum() or c == "_" else "" for c in target_metric)
+    if target_val is not None and safe != "accuracy":
+        return f"epoch_{epoch:03d}_acc{val_accuracy:.4f}_{safe}{target_val:.4f}.pt"
+    return f"epoch_{epoch:03d}_acc{val_accuracy:.4f}.pt"
 
 
 def save_checkpoint(
@@ -29,17 +47,19 @@ def save_checkpoint(
     metrics: dict,
     hyperparams: dict,
     keep_last: int = 3,
+    target_metric: str = "accuracy",
 ) -> Path:
     """Save a checkpoint and maintain a rolling window of the last N files.
 
-    Always writes/overwrites 'best.pt' when val_accuracy is the highest seen.
+    Always writes/overwrites 'best.pt' when the target metric is the best seen.
     Returns the path of the file that was written.
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     val_accuracy = metrics.get("accuracy", 0.0)
-    name         = checkpoint_name(epoch, val_accuracy)
+    target_val   = metrics.get(target_metric, val_accuracy)
+    name         = checkpoint_name(epoch, val_accuracy, target_metric, target_val)
     path         = checkpoint_dir / name
 
     payload = {
@@ -55,13 +75,15 @@ def save_checkpoint(
     }
     torch.save(payload, path)
 
-    # Overwrite best.pt if this is the best val accuracy so far
+    # Overwrite best.pt if this checkpoint is better on the target metric
     best_path = checkpoint_dir / "best.pt"
     if not best_path.exists():
         shutil.copy2(path, best_path)
     else:
-        prev = torch.load(best_path, weights_only=True)
-        if val_accuracy >= prev["metrics"].get("accuracy", 0.0):
+        prev      = torch.load(best_path, weights_only=True)
+        prev_val  = prev["metrics"].get(target_metric,
+                        prev["metrics"].get("accuracy", 0.0))
+        if _is_better(target_val, prev_val, target_metric):
             shutil.copy2(path, best_path)
 
     # Rolling window — delete oldest checkpoints beyond keep_last

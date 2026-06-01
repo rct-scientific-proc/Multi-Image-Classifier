@@ -163,6 +163,7 @@ class Trainer:
                 metrics=val_metrics,
                 hyperparams=hyperparams,
                 keep_last=self.keep_last,
+                target_metric=self.target_metric,
             )
 
             if self.logger is not None:
