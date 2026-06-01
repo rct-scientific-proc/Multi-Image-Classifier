@@ -25,7 +25,7 @@ from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN, SPLIT_VALIDATE
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
 from src.model import build_model
-from src.trainer import Trainer
+from src.trainer import FocalLoss, Trainer
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────
@@ -92,9 +92,7 @@ class TrainingWorker(QThread):
             )
 
             optimizer = _build_optimizer(model, s)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(s["epochs"], 1)
-            )
+            scheduler = _build_scheduler(optimizer, s)
 
             os.makedirs(s["checkpoint_dir"], exist_ok=True)
             os.makedirs(s["log_dir"], exist_ok=True)
@@ -133,6 +131,7 @@ class TrainingWorker(QThread):
                 target_metric=s["target_metric"],
                 logger=logger,
                 keep_last=int(s.get("keep_last", 3)),
+                criterion=_build_criterion(s),
             )
 
             self.sig_log.emit(
@@ -174,6 +173,29 @@ def _build_optimizer(model: torch.nn.Module, s: dict) -> torch.optim.Optimizer:
     if name == "RMSprop":
         return optim.RMSprop(params, lr=lr)
     raise ValueError(f"Unknown optimizer: {name}")
+
+
+def _build_scheduler(optimizer: torch.optim.Optimizer, s: dict):
+    name   = s.get("scheduler", "CosineAnnealing")
+    epochs = max(int(s.get("epochs", 10)), 1)
+    if name == "CosineAnnealing":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if name == "StepLR":
+        step = max(epochs // 3, 1)
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step, gamma=0.1)
+    if name == "ReduceLROnPlateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=3
+        )
+    return None   # "None" — no scheduler
+
+
+def _build_criterion(s: dict) -> torch.nn.Module:
+    name = s.get("loss_fn", "CrossEntropy")
+    if name == "FocalLoss":
+        gamma = float(s.get("focal_gamma", 2.0))
+        return FocalLoss(gamma=gamma)
+    return torch.nn.CrossEntropyLoss()
 
 
 # ── Panel ─────────────────────────────────────────────────────────────────────

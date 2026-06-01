@@ -27,11 +27,42 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.metrics import MetricTracker, DEFAULT_TARGET_METRIC
 from src.checkpoints import save_checkpoint
 from src.logger import ExperimentLogger
+
+
+class FocalLoss(nn.Module):
+    """Multi-class focal loss  FL = -α (1-p)^γ log(p).
+
+    Parameters
+    ----------
+    gamma : float
+        Focusing parameter. 0 = standard cross-entropy. Typical value 2.
+    alpha : float | None
+        Optional uniform class weight scalar. Pass a 1-D tensor for per-class
+        weights (same semantics as `nn.CrossEntropyLoss(weight=...)).
+    """
+
+    def __init__(self, gamma: float = 2.0, alpha=None, reduction: str = "mean"):
+        super().__init__()
+        self.gamma     = gamma
+        self.alpha     = alpha
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_p  = F.log_softmax(logits, dim=1)
+        ce     = F.nll_loss(log_p, targets, weight=self.alpha, reduction="none")
+        p      = torch.exp(-ce)                      # p_t
+        focal  = (1.0 - p) ** self.gamma * ce
+        if self.reduction == "mean":
+            return focal.mean()
+        if self.reduction == "sum":
+            return focal.sum()
+        return focal
 
 
 class Trainer:
@@ -49,6 +80,7 @@ class Trainer:
         target_metric: str = DEFAULT_TARGET_METRIC,
         logger: "ExperimentLogger | None" = None,
         keep_last: int = 3,
+        criterion: nn.Module | None = None,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -59,7 +91,7 @@ class Trainer:
         self.on_epoch_end = on_epoch_end
         self.on_batch_end = on_batch_end
         self.cancel_event  = cancel_event or threading.Event()
-        self.criterion     = nn.CrossEntropyLoss()
+        self.criterion     = criterion if criterion is not None else nn.CrossEntropyLoss()
         self._num_classes  = len(train_loader.dataset.classes)
         self.target_metric = target_metric
         self.logger        = logger
@@ -135,7 +167,13 @@ class Trainer:
             val_metrics   = self.validate(epoch)
 
             if self.scheduler is not None:
-                self.scheduler.step()
+                if isinstance(
+                    self.scheduler,
+                    torch.optim.lr_scheduler.ReduceLROnPlateau
+                ):
+                    self.scheduler.step(val_metrics["avg_loss"])
+                else:
+                    self.scheduler.step()
 
             lr = self.optimizer.param_groups[0]["lr"]
 

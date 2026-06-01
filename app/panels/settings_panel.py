@@ -45,6 +45,9 @@ _DEFAULTS: dict = {
     "batch_size":       32,
     "epochs":           10,
     "optimizer":        "Adam",
+    "scheduler":        "CosineAnnealing",
+    "loss_fn":          "CrossEntropy",
+    "focal_gamma":      2.0,
     "pretrained":       False,
     "target_metric":    DEFAULT_TARGET_METRIC,
     "device":           "cuda" if torch.cuda.is_available() else "cpu",
@@ -114,6 +117,28 @@ class SettingsPanel(QWidget):
         self._optimizer = QComboBox()
         self._optimizer.addItems(["Adam", "AdamW", "SGD", "RMSprop"])
         train_lay.addRow("Optimizer:", self._optimizer)
+
+        self._scheduler = QComboBox()
+        self._scheduler.addItems(["CosineAnnealing", "StepLR", "ReduceLROnPlateau", "None"])
+        self._scheduler.setCurrentText("CosineAnnealing")
+        train_lay.addRow("LR scheduler:", self._scheduler)
+
+        self._loss_fn = QComboBox()
+        self._loss_fn.addItems(["CrossEntropy", "FocalLoss"])
+        self._loss_fn.setCurrentText("CrossEntropy")
+        train_lay.addRow("Loss function:", self._loss_fn)
+
+        self._focal_gamma = QDoubleSpinBox()
+        self._focal_gamma.setDecimals(1)
+        self._focal_gamma.setRange(0.0, 10.0)
+        self._focal_gamma.setSingleStep(0.5)
+        self._focal_gamma.setValue(2.0)
+        self._focal_gamma.setToolTip("Focal loss focusing parameter γ (ignored for CrossEntropy)")
+        train_lay.addRow("Focal γ:", self._focal_gamma)
+        self._loss_fn.currentTextChanged.connect(
+            lambda t: self._focal_gamma.setEnabled(t == "FocalLoss")
+        )
+        self._focal_gamma.setEnabled(False)
 
         self._lr = QDoubleSpinBox()
         self._lr.setDecimals(6)
@@ -276,6 +301,12 @@ class SettingsPanel(QWidget):
         self._pretrained.setChecked(bool(s.get("pretrained", False)))
         idx = self._optimizer.findText(s.get("optimizer", "Adam"))
         self._optimizer.setCurrentIndex(max(0, idx))
+        idx = self._scheduler.findText(s.get("scheduler", "CosineAnnealing"))
+        self._scheduler.setCurrentIndex(max(0, idx))
+        idx = self._loss_fn.findText(s.get("loss_fn", "CrossEntropy"))
+        self._loss_fn.setCurrentIndex(max(0, idx))
+        self._focal_gamma.setValue(float(s.get("focal_gamma", 2.0)))
+        self._focal_gamma.setEnabled(s.get("loss_fn", "CrossEntropy") == "FocalLoss")
         self._lr.setValue(float(s.get("lr", 1e-3)))
         self._batch_size.setValue(int(s.get("batch_size", 32)))
         self._epochs.setValue(int(s.get("epochs", 10)))
@@ -304,6 +335,9 @@ class SettingsPanel(QWidget):
             "in_channels":      self._in_channels.value(),
             "pretrained":       self._pretrained.isChecked(),
             "optimizer":        self._optimizer.currentText(),
+            "scheduler":        self._scheduler.currentText(),
+            "loss_fn":          self._loss_fn.currentText(),
+            "focal_gamma":      self._focal_gamma.value(),
             "lr":               self._lr.value(),
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),
