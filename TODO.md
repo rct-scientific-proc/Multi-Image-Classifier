@@ -23,9 +23,9 @@ is involved, so you can validate the core logic independently.
 - [x] `src/checkpoints.py` — save/load checkpoint (model weights, optimizer state, epoch, metrics)
 
 ## Phase 4 — Logging
-- [ ] `src/logger.py` — TensorBoard `SummaryWriter` wrapper; log scalars, confusion matrix image
-- [ ] Decide log directory convention (`runs/<experiment_name>/<timestamp>`)
-- [ ] Log hyperparameters with `writer.add_hparams()`
+- [x] `src/logger.py` — TensorBoard `SummaryWriter` wrapper; log scalars, confusion matrix image
+- [x] Decide log directory convention (`runs/<experiment_name>/<timestamp>`)
+- [x] Log hyperparameters with `writer.add_hparams()`
 
 ## Phase 5 — PyQt5 app skeleton
 - [ ] `app/main.py` — entry point; `QApplication` + show main window

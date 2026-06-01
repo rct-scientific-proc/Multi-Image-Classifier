@@ -2,3 +2,4 @@
 test/
 __pycache__/
 *egg-info/
+runs/

@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 
 from src.metrics import MetricTracker, DEFAULT_TARGET_METRIC
 from src.checkpoints import save_checkpoint
+from src.logger import ExperimentLogger
 
 
 class Trainer:
@@ -46,6 +47,7 @@ class Trainer:
         on_batch_end: Callable[[dict], None] | None = None,
         cancel_event: threading.Event | None = None,
         target_metric: str = DEFAULT_TARGET_METRIC,
+        logger: "ExperimentLogger | None" = None,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -59,6 +61,8 @@ class Trainer:
         self.criterion     = nn.CrossEntropyLoss()
         self._num_classes  = len(train_loader.dataset.classes)
         self.target_metric = target_metric
+        self.logger        = logger
+        self._class_names  = list(train_loader.dataset.classes)
 
     # ------------------------------------------------------------------
     def train_one_epoch(self, epoch: int) -> dict:
@@ -158,6 +162,15 @@ class Trainer:
                 hyperparams=hyperparams,
             )
 
+            if self.logger is not None:
+                self.logger.log_epoch(info, self._class_names)
+
             if self.on_epoch_end is not None:
                 self.on_epoch_end(info)
+
+        if self.logger is not None:
+            best_ckpt_path = Path(checkpoint_dir) / "best.pt"
+            if best_ckpt_path.exists():
+                best = torch.load(best_ckpt_path, weights_only=True)
+                self.logger.log_hparams(hyperparams, best.get("metrics", {}))
 
