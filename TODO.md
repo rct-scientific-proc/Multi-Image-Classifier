@@ -57,8 +57,11 @@ is involved, so you can validate the core logic independently.
 - [ ] Progress bar for current epoch (batch-level granularity)
 
 ## Phase 9 — Checkpoint management
-- [ ] `app/panels/checkpoint_panel.py` — list saved checkpoints, allow resume from selected one
-- [ ] "Export best model" button (copies best val-accuracy checkpoint to a chosen path)
+- [x] `app/panels/checkpoint_panel.py` — lists `epoch_*.pt` files (★ marks best), auto-refreshes after each epoch
+- [x] Double-click to inspect epoch, backbone, and all scalar metrics
+- [x] "Resume from selected" emits `sig_resume_requested(path)` → logged in console (full resume in Phase 10)
+- [x] "Export best…" copies `best.pt` to a user-chosen path via `QFileDialog`
+- [x] Manual refresh button (↻)
 
 ## Phase 10 — TensorBoard integration
 - [ ] Add a configurable port setting (default `6006`) to the settings panel

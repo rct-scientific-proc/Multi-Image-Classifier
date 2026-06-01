@@ -70,6 +70,9 @@ class MainWindow(QMainWindow):
             self.checkpoint_panel.refresh
         )
 
+        # ---- Wire checkpoint panel signals ----
+        self.checkpoint_panel.sig_resume_requested.connect(self._on_resume_requested)
+
     # ------------------------------------------------------------------
     def _on_epoch_complete(self, info: dict):
         self._status.showMessage(
@@ -80,6 +83,10 @@ class MainWindow(QMainWindow):
 
     def _on_training_finished(self):
         self._status.showMessage("Training complete")
+
+    def _on_resume_requested(self, path: str):
+        self.console_panel.append_message(f"[INFO] Resume from: {path}")
+        self._status.showMessage(f"Resume checkpoint: {path}")
 
     def closeEvent(self, event):
         self.settings_panel.save_settings()
