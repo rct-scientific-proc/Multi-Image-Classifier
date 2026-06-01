@@ -73,7 +73,7 @@ class TrainingWorker(QThread):
                 f"Classes: {num_classes}"
             )
 
-            pin = s["device"] != "cpu"
+            pin = bool(s.get("pin_memory", False))
             train_loader = make_dataloader(
                 train_ds, batch_size=s["batch_size"],
                 shuffle=True, num_workers=s["num_workers"], pin_memory=pin,

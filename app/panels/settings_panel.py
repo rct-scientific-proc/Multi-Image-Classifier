@@ -56,6 +56,7 @@ _DEFAULTS: dict = {
     "experiment_name":  "experiment",
     "tensorboard_port": 6006,
     "num_workers":      0,
+    "pin_memory":       torch.cuda.is_available(),
     "keep_last":        3,
 }
 
@@ -162,6 +163,16 @@ class SettingsPanel(QWidget):
         self._num_workers.setValue(0)
         train_lay.addRow("DataLoader workers:", self._num_workers)
 
+        self._pin_memory = QCheckBox("Pin memory (faster CPU→GPU transfer)")
+        self._pin_memory.setChecked(torch.cuda.is_available())
+        self._pin_memory.setToolTip(
+            "Enables pinned (page-locked) memory in the DataLoader.\n"
+            "Only beneficial when training on a CUDA GPU."
+        )
+        train_lay.addRow("", self._pin_memory)
+        # auto-toggle when device changes
+        self._device.currentIndexChanged.connect(self._on_device_changed)
+
         self._keep_last = QSpinBox()
         self._keep_last.setRange(1, 100)
         self._keep_last.setValue(3)
@@ -255,6 +266,12 @@ class SettingsPanel(QWidget):
     def _on_backbone_changed(self, name: str) -> None:
         self._pretrained.setEnabled(name != "simple_cnn")
 
+    def _on_device_changed(self) -> None:
+        is_gpu = self._device.currentData() not in (None, "cpu")
+        self._pin_memory.setEnabled(is_gpu)
+        if not is_gpu:
+            self._pin_memory.setChecked(False)
+
     def _browse_h5(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select H5 dataset", "", "HDF5 files (*.h5 *.hdf5);;All files (*)"
@@ -312,6 +329,7 @@ class SettingsPanel(QWidget):
         self._epochs.setValue(int(s.get("epochs", 10)))
         self._num_workers.setValue(int(s.get("num_workers", 0)))
         self._keep_last.setValue(int(s.get("keep_last", 3)))
+        self._pin_memory.setChecked(bool(s.get("pin_memory", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
         self._target_metric.setCurrentIndex(max(0, idx))
         device_data = s.get("device", "cpu")
@@ -342,6 +360,7 @@ class SettingsPanel(QWidget):
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),
             "num_workers":      self._num_workers.value(),
+            "pin_memory":       self._pin_memory.isChecked(),
             "keep_last":        self._keep_last.value(),
             "target_metric":    self._target_metric.currentText(),
             "device":           self._device.currentData(),
