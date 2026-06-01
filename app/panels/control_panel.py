@@ -4,18 +4,24 @@ Control panel — Start / Pause / Stop buttons + QThread training worker.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
 import traceback
+from datetime import datetime
 
+import numpy as np
 import torch
 import torch.optim as optim
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -23,9 +29,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN, SPLIT_VALIDATE
+from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN, SPLIT_VALIDATE, SPLIT_TEST
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
+from src.metrics import MetricTracker
 from src.model import build_model
 from src.trainer import FocalLoss, Trainer
 
@@ -179,6 +186,147 @@ class TrainingWorker(QThread):
             self.sig_finished.emit()
 
 
+# ── Inference Worker ──────────────────────────────────────────────────────────
+
+class InferenceWorker(QThread):
+    """Runs inference on the test split using a saved checkpoint."""
+
+    sig_log      = pyqtSignal(str)
+    sig_progress = pyqtSignal(int, int)        # (current_batch, total_batches)
+    sig_done     = pyqtSignal(dict)            # final metrics dict (json-safe)
+    sig_error    = pyqtSignal(str)
+    sig_finished = pyqtSignal()
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        h5_path: str,
+        device: str,
+        batch_size: int,
+        num_workers: int,
+        pin_memory: bool,
+        use_amp: bool,
+        save_json_path: str | None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._ckpt_path     = checkpoint_path
+        self._h5_path       = h5_path
+        self._device        = device
+        self._batch_size    = batch_size
+        self._num_workers   = num_workers
+        self._pin_memory    = pin_memory
+        self._use_amp       = use_amp and str(device).startswith("cuda")
+        self._save_json     = save_json_path
+        self._cancel_event  = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            self.sig_log.emit(f"Loading checkpoint: {self._ckpt_path}")
+            ckpt = torch.load(self._ckpt_path, weights_only=True)
+            hp   = ckpt.get("hyperparams", {}) or {}
+
+            backbone    = hp.get("backbone", "simple_cnn")
+            in_channels = int(hp.get("in_channels", 1))
+            pretrained  = bool(hp.get("pretrained", False))
+
+            self.sig_log.emit(f"Loading test split from: {self._h5_path}")
+            test_ds = H5Dataset(self._h5_path, split=SPLIT_TEST)
+            num_classes = len(test_ds.classes)
+            self.sig_log.emit(
+                f"  Test: {len(test_ds)} samples  Classes: {num_classes}"
+            )
+            if len(test_ds) == 0:
+                raise RuntimeError("Test split contains 0 samples.")
+
+            test_loader = make_dataloader(
+                test_ds,
+                batch_size=self._batch_size,
+                shuffle=False,
+                num_workers=self._num_workers,
+                pin_memory=self._pin_memory,
+            )
+
+            self.sig_log.emit(
+                f"Building model: {backbone} (in_channels={in_channels}, "
+                f"num_classes={num_classes})"
+            )
+            model = build_model(
+                backbone_name=backbone,
+                in_channels=in_channels,
+                num_classes=num_classes,
+                pretrained=pretrained,
+            )
+            model.load_state_dict(ckpt["model_state_dict"])
+            model.to(self._device).eval()
+
+            criterion = torch.nn.CrossEntropyLoss()
+            tracker   = MetricTracker(num_classes)
+            total     = len(test_loader)
+            self.sig_log.emit(
+                f"Running inference on {self._device} "
+                f"(AMP={'on' if self._use_amp else 'off'})…"
+            )
+
+            with torch.no_grad():
+                for batch_idx, (images, labels, _gt) in enumerate(test_loader):
+                    if self._cancel_event.is_set():
+                        self.sig_log.emit("[INFO] Inference cancelled.")
+                        return
+
+                    images = images.to(self._device, non_blocking=True)
+                    labels = labels.to(self._device, non_blocking=True)
+
+                    with torch.amp.autocast("cuda", enabled=self._use_amp):
+                        logits = model(images)
+                        loss   = criterion(logits, labels)
+                    tracker.update(logits, labels, loss.item())
+                    self.sig_progress.emit(batch_idx + 1, total)
+
+            metrics = tracker.compute()
+            payload = _metrics_to_jsonable(metrics, class_names=list(test_ds.classes))
+            payload["checkpoint"] = os.path.abspath(self._ckpt_path)
+            payload["h5_path"]    = os.path.abspath(self._h5_path)
+            payload["device"]     = self._device
+            payload["num_samples"] = len(test_ds)
+            payload["timestamp"]  = datetime.now().isoformat(timespec="seconds")
+
+            if self._save_json:
+                os.makedirs(os.path.dirname(os.path.abspath(self._save_json)) or ".",
+                            exist_ok=True)
+                with open(self._save_json, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+                self.sig_log.emit(f"Saved metrics → {self._save_json}")
+
+            self.sig_done.emit(payload)
+
+        except Exception:
+            self.sig_error.emit(traceback.format_exc())
+        finally:
+            self.sig_finished.emit()
+
+
+def _metrics_to_jsonable(metrics: dict, class_names: list[str]) -> dict:
+    """Convert a MetricTracker result dict into JSON-serialisable form."""
+    out: dict = {"class_names": list(class_names)}
+    for k, v in metrics.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist()
+        elif isinstance(v, (np.floating, np.integer)):
+            out[k] = v.item()
+        elif isinstance(v, list):
+            out[k] = [x.item() if isinstance(x, (np.floating, np.integer)) else x
+                      for x in v]
+        elif isinstance(v, dict):
+            out[k] = _metrics_to_jsonable(v, class_names)
+        else:
+            out[k] = v
+    return out
+
+
 def _build_optimizer(model: torch.nn.Module, s: dict) -> torch.optim.Optimizer:
     name   = s.get("optimizer", "Adam")
     lr     = float(s.get("lr", 1e-3))
@@ -246,6 +394,7 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self._settings              = settings_panel
         self._worker: TrainingWorker | None = None
+        self._inf_worker: InferenceWorker | None = None
 
         # ── buttons ───────────────────────────────────────────────────────
         btn_box = QGroupBox("Training")
@@ -275,6 +424,59 @@ class ControlPanel(QWidget):
         layout.addWidget(self._epoch_label)
         layout.addWidget(self._batch_bar)
         layout.addWidget(self._metric_label)
+
+        # ── Inference ─────────────────────────────────────────────────────
+        inf_box = QGroupBox("Inference (test split)")
+        inf_lay = QVBoxLayout(inf_box)
+
+        # Checkpoint row
+        ck_row = QHBoxLayout()
+        ck_row.addWidget(QLabel("Checkpoint:"))
+        self._inf_ckpt_edit = QLineEdit()
+        self._inf_ckpt_edit.setPlaceholderText("Path to .pt checkpoint")
+        ck_row.addWidget(self._inf_ckpt_edit)
+        btn_browse_ckpt = QPushButton("Browse…")
+        btn_browse_ckpt.clicked.connect(self._on_browse_inf_ckpt)
+        ck_row.addWidget(btn_browse_ckpt)
+        inf_lay.addLayout(ck_row)
+
+        # Save-to-JSON row
+        json_row = QHBoxLayout()
+        self._inf_save_json = QCheckBox("Save metrics to JSON:")
+        self._inf_save_json.setChecked(True)
+        json_row.addWidget(self._inf_save_json)
+        self._inf_json_edit = QLineEdit()
+        self._inf_json_edit.setPlaceholderText("Output .json path")
+        json_row.addWidget(self._inf_json_edit)
+        btn_browse_json = QPushButton("Browse…")
+        btn_browse_json.clicked.connect(self._on_browse_inf_json)
+        json_row.addWidget(btn_browse_json)
+        self._inf_save_json.toggled.connect(self._inf_json_edit.setEnabled)
+        self._inf_save_json.toggled.connect(btn_browse_json.setEnabled)
+        inf_lay.addLayout(json_row)
+
+        # Run / Cancel + progress
+        run_row = QHBoxLayout()
+        self._btn_inf_run    = QPushButton("▶  Run Inference")
+        self._btn_inf_cancel = QPushButton("⏹  Cancel")
+        self._btn_inf_cancel.setEnabled(False)
+        run_row.addWidget(self._btn_inf_run)
+        run_row.addWidget(self._btn_inf_cancel)
+        inf_lay.addLayout(run_row)
+
+        self._inf_progress = QProgressBar()
+        self._inf_progress.setTextVisible(True)
+        self._inf_progress.setFormat("Batch %v / %m")
+        inf_lay.addWidget(self._inf_progress)
+
+        self._inf_result_label = QLabel("")
+        self._inf_result_label.setWordWrap(True)
+        inf_lay.addWidget(self._inf_result_label)
+
+        self._btn_inf_run.clicked.connect(self._on_inf_run)
+        self._btn_inf_cancel.clicked.connect(self._on_inf_cancel)
+
+        layout.addWidget(inf_box)
         layout.addStretch()
 
     # ── button handlers ───────────────────────────────────────────────────────
@@ -381,3 +583,99 @@ class ControlPanel(QWidget):
         # Generic fallback: show last line of the traceback
         first_line = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
         QMessageBox.critical(self, "Training error", first_line)
+
+    # ── inference handlers ────────────────────────────────────────────────────
+
+    def _on_browse_inf_ckpt(self) -> None:
+        s = self._settings.get_settings()
+        start_dir = s.get("checkpoint_dir", "") or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select checkpoint for inference", start_dir,
+            "PyTorch checkpoint (*.pt);;All files (*)"
+        )
+        if path:
+            self._inf_ckpt_edit.setText(path)
+            if self._inf_save_json.isChecked() and not self._inf_json_edit.text().strip():
+                base, _ = os.path.splitext(path)
+                self._inf_json_edit.setText(base + "_test_metrics.json")
+
+    def _on_browse_inf_json(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save metrics JSON", self._inf_json_edit.text() or "",
+            "JSON files (*.json);;All files (*)"
+        )
+        if path:
+            self._inf_json_edit.setText(path)
+
+    def _on_inf_run(self) -> None:
+        if self._inf_worker and self._inf_worker.isRunning():
+            return
+        s = self._settings.get_settings()
+        ckpt = self._inf_ckpt_edit.text().strip()
+        h5   = s.get("h5_path", "").strip()
+        if not ckpt or not os.path.isfile(ckpt):
+            QMessageBox.warning(self, "Cannot run inference",
+                                f"Checkpoint not found:\n{ckpt}")
+            return
+        if not h5 or not os.path.isfile(h5):
+            QMessageBox.warning(self, "Cannot run inference",
+                                f"H5 dataset not found:\n{h5}")
+            return
+        save_json = self._inf_json_edit.text().strip() if self._inf_save_json.isChecked() else None
+        if self._inf_save_json.isChecked() and not save_json:
+            QMessageBox.warning(self, "Cannot run inference",
+                                "Output JSON path is empty.")
+            return
+
+        self._inf_worker = InferenceWorker(
+            checkpoint_path=ckpt,
+            h5_path=h5,
+            device=s.get("device", "cpu"),
+            batch_size=int(s.get("batch_size", 32)) * 2,
+            num_workers=int(s.get("num_workers", 0)),
+            pin_memory=bool(s.get("pin_memory", False)),
+            use_amp=bool(s.get("use_amp", False)),
+            save_json_path=save_json,
+        )
+        self._inf_worker.sig_log.connect(self.sig_log_message)
+        self._inf_worker.sig_progress.connect(self._on_inf_progress)
+        self._inf_worker.sig_done.connect(self._on_inf_done)
+        self._inf_worker.sig_error.connect(self._on_inf_error)
+        self._inf_worker.sig_finished.connect(self._on_inf_finished)
+
+        self._btn_inf_run.setEnabled(False)
+        self._btn_inf_cancel.setEnabled(True)
+        self._inf_progress.setValue(0)
+        self._inf_result_label.setText("")
+        self._inf_worker.start()
+
+    def _on_inf_cancel(self) -> None:
+        if self._inf_worker:
+            self._inf_worker.cancel()
+            self.sig_log_message.emit("[INFO] Inference cancel requested…")
+
+    def _on_inf_progress(self, current: int, total: int) -> None:
+        self._inf_progress.setMaximum(total)
+        self._inf_progress.setValue(current)
+
+    def _on_inf_done(self, metrics: dict) -> None:
+        acc = metrics.get("accuracy", float("nan"))
+        f1  = metrics.get("f1_macro", float("nan"))
+        mcc = metrics.get("mcc", float("nan"))
+        loss = metrics.get("avg_loss", float("nan"))
+        self._inf_result_label.setText(
+            f"acc={acc:.4f}  f1_macro={f1:.4f}  mcc={mcc:.4f}  loss={loss:.4f}"
+        )
+        self.sig_log_message.emit(
+            f"[INFER] accuracy={acc:.4f}  f1_macro={f1:.4f}  "
+            f"mcc={mcc:.4f}  avg_loss={loss:.4f}"
+        )
+
+    def _on_inf_error(self, tb: str) -> None:
+        self.sig_log_message.emit(f"[INFER ERROR]\n{tb}")
+        first_line = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
+        QMessageBox.critical(self, "Inference error", first_line)
+
+    def _on_inf_finished(self) -> None:
+        self._btn_inf_run.setEnabled(True)
+        self._btn_inf_cancel.setEnabled(False)
