@@ -170,8 +170,6 @@ class SettingsPanel(QWidget):
             "Only beneficial when training on a CUDA GPU."
         )
         train_lay.addRow("", self._pin_memory)
-        # auto-toggle when device changes
-        self._device.currentIndexChanged.connect(self._on_device_changed)
 
         self._keep_last = QSpinBox()
         self._keep_last.setRange(1, 100)
@@ -195,6 +193,8 @@ class SettingsPanel(QWidget):
         if idx >= 0:
             self._device.setCurrentIndex(idx)
         train_lay.addRow("Device:", self._device)
+        # auto-toggle pin_memory when device changes
+        self._device.currentIndexChanged.connect(self._on_device_changed)
 
         form.addRow(train_box)
 
