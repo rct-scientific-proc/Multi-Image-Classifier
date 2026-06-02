@@ -11,7 +11,8 @@ Usage:
     train_dl = make_dataloader(train_ds, batch_size=32, shuffle=True)
 
     for images, labels, gt in train_dl:
-        # images: float32 (B, C, H, W)  — normalised to [0, 1]
+        # images: uint8 (B, C, H, W) when no transform is set — convert on GPU
+        #         float32 (B, C, H, W) normalised to [0, 1] when a transform is set
         # labels: int64   (B,)
         # gt:     bool    (B,)
         ...
@@ -93,11 +94,15 @@ class H5Dataset(Dataset):
         label = int(f["labels"][h5_idx])
         gt    = bool(f["gt"][h5_idx])
 
-        # HDF5 stores (H, W, C); PyTorch expects (C, H, W)
-        image = torch.from_numpy(image.astype(np.float32) * (1.0 / 255.0))
-        image = image.permute(2, 0, 1)       # (C, H, W)
-
-        if self.transform is not None:
+        if self.transform is None:
+            # Fast path: keep as uint8 and let the trainer convert + scale on
+            # the GPU in one fused op per batch. 4× less PCIe traffic, no
+            # per-sample float work on the CPU.
+            image = torch.from_numpy(image).permute(2, 0, 1).contiguous()
+        else:
+            # Transforms expect float in [0, 1]; do the conversion here.
+            image = torch.from_numpy(image.astype(np.float32) * (1.0 / 255.0))
+            image = image.permute(2, 0, 1)       # (C, H, W)
             image = self.transform(image)
 
         return image, label, gt

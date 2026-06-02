@@ -30,12 +30,15 @@ def checkpoint_name(
     val_accuracy: float,
     target_metric: str = "accuracy",
     target_val: float | None = None,
+    model_name: str | None = None,
 ) -> str:
-    # Sanitise metric name: keep alphanumerics + underscore only
-    safe = "".join(c if c.isalnum() or c == "_" else "" for c in target_metric)
-    if target_val is not None and safe != "accuracy":
-        return f"epoch_{epoch:03d}_acc{val_accuracy:.4f}_{safe}{target_val:.4f}.pt"
-    return f"epoch_{epoch:03d}_acc{val_accuracy:.4f}.pt"
+    # Sanitise model and metric names: keep alphanumerics + underscore only
+    safe_model = "".join(c if c.isalnum() or c == "_" else "" for c in (model_name or "")).strip()
+    safe_metric = "".join(c if c.isalnum() or c == "_" else "" for c in target_metric)
+    prefix = f"{safe_model}_" if safe_model else ""
+    if target_val is not None and safe_metric != "accuracy":
+        return f"{prefix}epoch_{epoch:03d}_acc{val_accuracy:.4f}_{safe_metric}{target_val:.4f}.pt"
+    return f"{prefix}epoch_{epoch:03d}_acc{val_accuracy:.4f}.pt"
 
 
 def save_checkpoint(
@@ -48,6 +51,7 @@ def save_checkpoint(
     hyperparams: dict,
     keep_last: int = 3,
     target_metric: str = "accuracy",
+    model_name: str | None = None,
 ) -> Path:
     """Save a checkpoint and maintain a rolling window of the last N files.
 
@@ -59,7 +63,9 @@ def save_checkpoint(
 
     val_accuracy = metrics.get("accuracy", 0.0)
     target_val   = metrics.get(target_metric, val_accuracy)
-    name         = checkpoint_name(epoch, val_accuracy, target_metric, target_val)
+    name         = checkpoint_name(
+        epoch, val_accuracy, target_metric, target_val, model_name=model_name
+    )
     path         = checkpoint_dir / name
 
     payload = {

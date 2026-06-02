@@ -115,6 +115,8 @@ class Trainer:
 
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
+            if images.dtype == torch.uint8:
+                images = images.float().mul_(1.0 / 255.0)
 
             self.optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=self.use_amp):
@@ -146,6 +148,8 @@ class Trainer:
         for images, labels, _gt in self.val_loader:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
+            if images.dtype == torch.uint8:
+                images = images.float().mul_(1.0 / 255.0)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 logits = self.model(images)
@@ -215,6 +219,7 @@ class Trainer:
                 hyperparams=hyperparams,
                 keep_last=self.keep_last,
                 target_metric=self.target_metric,
+                model_name=str(hyperparams.get("backbone", "")) or type(self.model).__name__,
             )
 
             if self.logger is not None:

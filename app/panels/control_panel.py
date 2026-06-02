@@ -279,6 +279,8 @@ class InferenceWorker(QThread):
 
                     images = images.to(self._device, non_blocking=True)
                     labels = labels.to(self._device, non_blocking=True)
+                    if images.dtype == torch.uint8:
+                        images = images.float().mul_(1.0 / 255.0)
 
                     with torch.amp.autocast("cuda", enabled=self._use_amp):
                         logits = model(images)
