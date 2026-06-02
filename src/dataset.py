@@ -82,7 +82,7 @@ class H5Dataset(Dataset):
         file handle per worker rather than one per sample.
         """
         if self._file is None:
-            self._file = h5py.File(self.h5_path, "r")
+            self._file = h5py.File(self.h5_path, "r")  # 64 MiB chunk cache
         return self._file
 
     def __getitem__(self, idx: int):
