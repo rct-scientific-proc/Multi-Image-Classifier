@@ -129,7 +129,7 @@ class CheckpointPanel(QWidget):
             self._btn_export.setEnabled(False)
             return
 
-        files = sorted(ck_path.glob("epoch_*.pt"), key=lambda p: p.stat().st_mtime)
+        files = sorted(ck_path.glob("*epoch_*.pt"), key=lambda p: p.stat().st_mtime)
         best  = ck_path / "best.pt"
 
         # Determine which epoch_*.pt corresponds to best.pt by reading its epoch field

@@ -95,7 +95,7 @@ def save_checkpoint(
     # Rolling window — delete oldest checkpoints beyond keep_last
     # (excludes best.pt)
     existing = sorted(
-        [p for p in checkpoint_dir.glob("epoch_*.pt")],
+        [p for p in checkpoint_dir.glob("*epoch_*.pt")],
         key=lambda p: p.stat().st_mtime,
     )
     for old in existing[:-keep_last]:

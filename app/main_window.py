@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
             log_dir=settings.get("log_dir", "runs"),
             port=settings.get("tensorboard_port", 6006),
         )
+        self.checkpoint_panel.refresh(settings.get("checkpoint_dir", "checkpoints"))
         self._status.showMessage("Training started…")
 
     def closeEvent(self, event):
