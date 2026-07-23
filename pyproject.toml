@@ -27,6 +27,9 @@ dependencies = [
     # so they are required rather than optional.
     "matplotlib",
     "pillow",
+    # Live training charts in the Metrics tab. app/panels/metrics_panel.py
+    # degrades to an install hint without it.
+    "pyqtgraph",
 ]
 
 [project.optional-dependencies]

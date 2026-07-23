@@ -83,7 +83,28 @@ is involved, so you can validate the core logic independently.
 - [x] Console scrollbar reference cached
 - [x] Improved tooltips (focal γ); proper type hint on `Trainer.scheduler`
 - [x] Entry point already packaged in `pyproject.toml` (`image-classifier`)
-- [ ] Dark/light theme toggle (deferred — Qt default theme is fine for now)
+- [x] Dark/light theme toggle — `app/theme.py` (QPalette + QSS), View ▸ Theme menu,
+      persisted in settings.json (kept out of `get_settings()` so it never reaches
+      `add_hparams`)
+
+---
+
+## Phase 12 — UI restructure
+
+- [x] High-DPI opt-in (`AA_EnableHighDpiScaling`, `AA_UseHighDpiPixmaps`,
+      `PassThrough` rounding) — must run before `QApplication` exists
+- [x] Fusion style, so QSS applies consistently
+- [x] Right dock tabbed: Train / Inference / Checkpoints / TensorBoard
+      (was ~685px stacked, now ~220px — the tallest single page)
+- [x] `InferencePanel` split out of `control_panel.py`
+- [x] Settings panel tabbed: Data / Model / Optimizer / Hardware / Output
+      (was one 24-row 1025px form, now ≤7 rows per page)
+- [x] Per-tab scroll areas so any page can grow without clipping
+- [x] Menu bar: File / View (dock toggles + theme) / Help; docks now closable
+- [x] Live metric charts in the centre panel (pyqtgraph) — Log / Metrics tabs
+      `app/panels/metrics_panel.py`: 2×2 linked plots (loss, accuracy, target
+      metric, log-scaled LR), theme-aware, shared crosshair readout. Four separate
+      plots rather than twin axes. Degrades to an install hint without pyqtgraph.
 
 ---
 

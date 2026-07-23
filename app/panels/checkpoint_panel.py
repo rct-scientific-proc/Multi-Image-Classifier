@@ -94,6 +94,9 @@ class CheckpointPanel(QWidget):
         self._btn_export_metrics = QPushButton("Export metrics…")
         self._btn_refresh = QPushButton("↻")
         self._btn_refresh.setFixedWidth(32)
+        # Opts out of the stylesheet's button padding, which would clip a
+        # fixed-width glyph button (see app/theme.py).
+        self._btn_refresh.setObjectName("iconButton")
         self._btn_refresh.setToolTip("Refresh the checkpoint list")
         self._btn_resume.setEnabled(False)
         self._btn_export.setEnabled(False)

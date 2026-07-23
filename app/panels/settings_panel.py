@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.panels.common import fit_tabs, scrollable
+from app.theme import DEFAULT_THEME
 from src.metrics import DEFAULT_TARGET_METRIC, TARGET_METRICS
 from src.model import AVAILABLE_BACKBONES
 
@@ -60,12 +61,17 @@ _DEFAULTS: dict = {
     "shuffle_every_n_epochs": 1,
     "keep_last":        3,
     "recall_targets":   "0.95, 0.99",
+    "theme":            DEFAULT_THEME,
 }
 
 
 class SettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # Set before _load_from_file: _apply_settings is the only other writer
+        # and it never runs when there is no settings file yet.
+        self._theme = DEFAULT_THEME
 
         # ── tabbed container ──────────────────────────────────────────────
         # One 24-row form meant every new option lengthened a single 1025px
@@ -267,6 +273,8 @@ class SettingsPanel(QWidget):
         btn_browse_resume.clicked.connect(self._browse_resume)
         btn_clear_resume = QPushButton("✕")
         btn_clear_resume.setFixedWidth(28)
+        # See checkpoint_panel — opts out of the stylesheet's button padding.
+        btn_clear_resume.setObjectName("iconButton")
         btn_clear_resume.setToolTip("Clear — start from scratch")
         btn_clear_resume.clicked.connect(lambda: self._resume_edit.clear())
         resume_row = QHBoxLayout()
@@ -344,6 +352,11 @@ class SettingsPanel(QWidget):
         self._apply_settings({**_DEFAULTS, **data})
 
     def _apply_settings(self, s: dict) -> None:
+        # Theme is persisted alongside the training settings but deliberately
+        # kept out of get_settings(): that dict is handed to the Trainer as
+        # `hyperparams` and logged via add_hparams(), where a UI preference
+        # would just be noise.
+        self._theme = s.get("theme", DEFAULT_THEME)
         self._h5_edit.setText(s.get("h5_path", ""))
         idx = self._backbone.findText(s.get("backbone", "simple_cnn"))
         self._backbone.setCurrentIndex(max(0, idx))
@@ -410,9 +423,21 @@ class SettingsPanel(QWidget):
             "tensorboard_port": self._tb_port.value(),
         }
 
+    @property
+    def theme(self) -> str:
+        """Persisted UI theme name — see _apply_settings for why it lives here
+        rather than in get_settings()."""
+        return self._theme
+
+    @theme.setter
+    def theme(self, name: str) -> None:
+        self._theme = name
+
     def save_settings(self, path: str | None = None) -> None:
         """Persist settings to *path* (defaults to the app-data JSON file)."""
         target = path or _SETTINGS_FILE
         os.makedirs(os.path.dirname(target), exist_ok=True)
+        payload = self.get_settings()
+        payload["theme"] = self._theme
         with open(target, "w", encoding="utf-8") as f:
-            json.dump(self.get_settings(), f, indent=2)
+            json.dump(payload, f, indent=2)
