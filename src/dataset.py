@@ -30,6 +30,29 @@ SPLIT_VALIDATE = 1
 SPLIT_TEST     = 2
 
 
+def peek_h5_meta(h5_path: str) -> dict:
+    """Read an H5 file's shape/class metadata without loading any image data.
+
+    Cheap enough to call from GUI validation. Returns keys: num_samples,
+    height, width, channels, num_classes, classes.
+    Raises OSError if the file cannot be opened, KeyError if a required
+    dataset is missing.
+    """
+    with h5py.File(h5_path, "r") as f:
+        shape   = f["images"].shape          # (N, H, W, C)
+        classes = list(f["classes"].asstr()[:])
+
+    return {
+        "num_samples": int(shape[0]),
+        "height":      int(shape[1]),
+        "width":       int(shape[2]),
+        # A trailing channel axis is optional; its absence means grayscale.
+        "channels":    int(shape[3]) if len(shape) > 3 else 1,
+        "num_classes": len(classes),
+        "classes":     classes,
+    }
+
+
 class H5Dataset(Dataset):
     """PyTorch Dataset backed by a single HDF5 file.
 

@@ -29,7 +29,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN, SPLIT_VALIDATE, SPLIT_TEST
+from src.dataset import (
+    H5Dataset, make_dataloader, peek_h5_meta,
+    SPLIT_TRAIN, SPLIT_VALIDATE, SPLIT_TEST,
+)
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
 from src.metrics import MetricTracker
@@ -166,7 +169,17 @@ class TrainingWorker(QThread):
                 self.sig_log.emit(f"Resuming from: {resume_path}")
                 ckpt = load_checkpoint(resume_path, model, optimizer, scheduler)
                 start_epoch = ckpt.get("epoch", 0) + 1
-                self.sig_log.emit(f"  Resuming at epoch {start_epoch}")
+                self.sig_log.emit(
+                    f"  Resuming at epoch {start_epoch} — training through "
+                    f"epoch {s['epochs'] - 1}"
+                )
+                if start_epoch >= s["epochs"]:
+                    self.sig_log.emit(
+                        f"[WARN] Nothing to do: the checkpoint is already at epoch "
+                        f"{start_epoch - 1} and 'Epochs' is set to {s['epochs']} "
+                        f"(total, not additional). Raise 'Epochs' above "
+                        f"{start_epoch} to continue this run."
+                    )
 
             trainer.fit(
                 epochs=s["epochs"],
@@ -520,6 +533,21 @@ class ControlPanel(QWidget):
         resume = s.get("resume_checkpoint", "").strip()
         if resume and not os.path.isfile(resume):
             return f"Resume checkpoint not found:\n{resume}"
+
+        # Check the file's channel count up front — a mismatch would otherwise
+        # only surface as an opaque shape error at the first conv layer.
+        try:
+            meta = peek_h5_meta(h5)
+        except (OSError, KeyError) as exc:
+            return f"Could not read H5 dataset:\n{h5}\n\n{exc}"
+        if meta["channels"] != int(s.get("in_channels", 1)):
+            return (
+                f"Input channels mismatch.\n\n"
+                f"Settings say in_channels={s.get('in_channels')}, but "
+                f"{os.path.basename(h5)} stores images with "
+                f"{meta['channels']} channel(s).\n\n"
+                f"Set 'Input channels' to {meta['channels']}."
+            )
         return ""
 
     def _on_pause(self) -> None:

@@ -166,13 +166,19 @@ class Trainer:
         hyperparams: dict,
         start_epoch: int = 0,
     ):
-        """Run the full training loop.
+        """Run the training loop from *start_epoch* up to *epochs*.
+
+        *epochs* is the TOTAL number of epochs for the run, not a count of
+        additional ones. Resuming a checkpoint saved at epoch 4 with epochs=10
+        therefore trains epochs 5-9, and the LR schedule (built with
+        T_max=epochs) stays aligned with the run it was created for.
+        Returns immediately when start_epoch >= epochs.
 
         Calls on_epoch_end(info) at the end of each epoch with:
             epoch, train_loss, train_accuracy, val_loss, val_accuracy, lr
         Saves a checkpoint after every epoch.
         """
-        for epoch in range(start_epoch, start_epoch + epochs):
+        for epoch in range(start_epoch, epochs):
             if self.cancel_event.is_set():
                 break
 
