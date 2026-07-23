@@ -2,28 +2,47 @@
 Main window — QMainWindow with dockable panels.
 
 Layout:
-    Left dock   — Settings panel   (fixed width)
+    Left dock   — Settings panel   (scrollable)
     Center      — Console panel    (expands)
-    Right dock  — Control + Checkpoint panels (stacked vertically)
+    Right dock  — Tabbed: Train / Inference / Checkpoints / TensorBoard
 """
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QMainWindow, QDockWidget, QWidget, QVBoxLayout, QStatusBar,
+    QMainWindow, QDockWidget, QWidget, QScrollArea, QStatusBar, QTabWidget,
 )
 
 from app.panels.settings_panel    import SettingsPanel
 from app.panels.control_panel     import ControlPanel
+from app.panels.inference_panel   import InferencePanel
 from app.panels.console_panel     import ConsolePanel
 from app.panels.checkpoint_panel  import CheckpointPanel
 from app.panels.tensorboard_panel import TensorBoardPanel
+
+
+def _scrollable(widget: QWidget) -> QScrollArea:
+    """Wrap *widget* in a vertical-only scroll area.
+
+    Applied per tab page so any one page can grow past the dock height without
+    clipping — the headroom that makes it safe to keep adding options.
+    """
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QScrollArea.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    area.setWidget(widget)
+    return area
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Classifier")
-        self.resize(1200, 700)
+        # The tabbed right dock only needs ~220px now, so height is driven by the
+        # settings form (~1025px natural — it scrolls at any realistic size) and
+        # by how much log you want visible. 820 is a comfortable default that
+        # still fits a 1080p screen once the taskbar is accounted for.
+        self.resize(1200, 820)
 
         # ---- Central widget: console ----
         self.console_panel = ConsolePanel()
@@ -39,25 +58,31 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.LeftDockWidgetArea, left_dock)
 
-        # ---- Right dock: controls + checkpoints stacked ----
-        self.control_panel    = ControlPanel(self.settings_panel)
-        self.checkpoint_panel = CheckpointPanel()
-
-        right_container = QWidget()
-        right_layout    = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.control_panel)
-        right_layout.addWidget(self.checkpoint_panel)
+        # ---- Right dock: one tab per task ----
+        # Stacking these four vertically needed ~685px and overflowed the window.
+        # Tabbed, the dock only ever needs the tallest single page (~220px), and
+        # each page has room to grow.
+        self.control_panel     = ControlPanel(self.settings_panel)
+        self.inference_panel   = InferencePanel(self.settings_panel)
+        self.checkpoint_panel  = CheckpointPanel()
         self.tensorboard_panel = TensorBoardPanel()
-        right_layout.addWidget(self.tensorboard_panel)
-        right_layout.addStretch()
+
+        right_tabs = QTabWidget()
+        right_tabs.addTab(_scrollable(self.control_panel),     "Train")
+        right_tabs.addTab(_scrollable(self.inference_panel),   "Inference")
+        right_tabs.addTab(_scrollable(self.checkpoint_panel),  "Checkpoints")
+        right_tabs.addTab(_scrollable(self.tensorboard_panel), "TensorBoard")
+        self.right_tabs = right_tabs
 
         right_dock = QDockWidget("Controls", self)
-        right_dock.setWidget(right_container)
+        right_dock.setWidget(right_tabs)
         right_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         right_dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
         )
+        # Stop either dock being dragged narrow enough to elide its button text.
+        left_dock.setMinimumWidth(300)
+        right_dock.setMinimumWidth(320)
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
 
         # ---- Status bar ----
@@ -67,6 +92,7 @@ class MainWindow(QMainWindow):
 
         # ---- Wire control panel signals to console ----
         self.control_panel.sig_log_message.connect(self.console_panel.append_message)
+        self.inference_panel.sig_log_message.connect(self.console_panel.append_message)
         self.control_panel.sig_epoch_complete.connect(self._on_epoch_complete)
         self.control_panel.sig_training_finished.connect(self._on_training_finished)
         self.control_panel.sig_checkpoint_saved.connect(

@@ -14,7 +14,6 @@ import torch
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -68,11 +67,15 @@ class CheckpointPanel(QWidget):
         super().__init__(parent)
         self._ck_dir: str = ""
 
-        box = QGroupBox("Checkpoints")
-        box_lay = QVBoxLayout(box)
+        # No enclosing QGroupBox — the "Checkpoints" tab label already names this.
+        box_lay = QVBoxLayout(self)
 
         # ── list ──────────────────────────────────────────────────────────
         self._list = QListWidget()
+        # QListWidget's default minimum height is only a few pixels, which lets
+        # the surrounding scroll area squash it to nothing instead of scrolling.
+        # ~6 rows is enough to be useful and gives the dock a real minimum.
+        self._list.setMinimumHeight(120)
         self._list.setToolTip("Double-click a checkpoint to inspect its metrics")
         self._list.itemDoubleClicked.connect(self._on_inspect)
         box_lay.addWidget(self._list)
@@ -84,12 +87,14 @@ class CheckpointPanel(QWidget):
         box_lay.addWidget(self._info)
 
         # ── buttons ───────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
+        # Two rows of two: all four on one row needs ~350px of label in a dock
+        # that is 320px wide, so the text was being elided.
         self._btn_resume = QPushButton("Resume from selected")
         self._btn_export = QPushButton("Export best…")
         self._btn_export_metrics = QPushButton("Export metrics…")
         self._btn_refresh = QPushButton("↻")
         self._btn_refresh.setFixedWidth(32)
+        self._btn_refresh.setToolTip("Refresh the checkpoint list")
         self._btn_resume.setEnabled(False)
         self._btn_export.setEnabled(False)
         self._btn_export_metrics.setEnabled(False)
@@ -98,20 +103,21 @@ class CheckpointPanel(QWidget):
             "target recalls) of the selected checkpoint — or best.pt if none "
             "selected — to a JSON file."
         )
-        btn_row.addWidget(self._btn_resume)
-        btn_row.addWidget(self._btn_export)
-        btn_row.addWidget(self._btn_export_metrics)
-        btn_row.addWidget(self._btn_refresh)
-        box_lay.addLayout(btn_row)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(self._btn_resume)
+        top_row.addWidget(self._btn_refresh)
+        box_lay.addLayout(top_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self._btn_export)
+        bottom_row.addWidget(self._btn_export_metrics)
+        box_lay.addLayout(bottom_row)
 
         self._btn_resume.clicked.connect(self._on_resume)
         self._btn_export.clicked.connect(self._on_export)
         self._btn_export_metrics.clicked.connect(self._on_export_metrics)
         self._btn_refresh.clicked.connect(lambda: self.refresh(self._ck_dir))
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(box)
 
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
 

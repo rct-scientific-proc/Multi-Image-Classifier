@@ -11,7 +11,6 @@ import webbrowser
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -29,18 +28,21 @@ class TensorBoardPanel(QWidget):
         self._log_dir  = "runs"
         self._port     = 6006
 
-        box = QGroupBox("TensorBoard")
-        box_lay = QVBoxLayout(box)
+        # No enclosing QGroupBox — the "TensorBoard" tab label already names this.
+        box_lay = QVBoxLayout(self)
 
         # ── status label ──────────────────────────────────────────────────
         self._status_label = QLabel("Not running")
+        self._status_label.setWordWrap(True)
         box_lay.addWidget(self._status_label)
 
         # ── buttons ───────────────────────────────────────────────────────
+        # Labels dropped the redundant "TB" suffix now that the tab names it.
         btn_row = QHBoxLayout()
-        self._btn_start = QPushButton("▶  Start TB")
-        self._btn_stop  = QPushButton("⏹  Stop TB")
-        self._btn_open  = QPushButton("🌐  Open in browser")
+        self._btn_start = QPushButton("▶  Start")
+        self._btn_stop  = QPushButton("⏹  Stop")
+        self._btn_open  = QPushButton("🌐  Open")
+        self._btn_open.setToolTip("Open the TensorBoard UI in your browser")
         self._btn_stop.setEnabled(False)
         self._btn_open.setEnabled(False)
         btn_row.addWidget(self._btn_start)
@@ -52,9 +54,7 @@ class TensorBoardPanel(QWidget):
         self._btn_stop.clicked.connect(self.stop)
         self._btn_open.clicked.connect(self.open_browser)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(box)
+        box_lay.addStretch()
 
         # Poll every 2 s to detect if the process has died unexpectedly
         self._poll_timer = QTimer(self)
