@@ -13,11 +13,11 @@ import threading
 import traceback
 from datetime import datetime
 
-import numpy as np
 import torch
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,9 +30,37 @@ from PyQt5.QtWidgets import (
 )
 
 from src.augment import Normalizer
+from src.figures import DEFAULT_FIGURES, FIGURES, FORMATS, export_figures
 from src.dataset import H5Dataset, make_dataloader, SPLIT_TEST
-from src.metrics import MetricTracker
+from src.metrics import (
+    MetricTracker, build_threshold_table, parse_target_list, to_jsonable,
+    write_threshold_table,
+)
 from src.model import build_model
+
+
+_FIGURE_TOOLTIPS = {
+    "recall_specificity":
+        "Every point is a threshold. Shows what each class costs you in false "
+        "alarms to reach a given recall — the figure for choosing an operating "
+        "point.",
+    "pr_curves":
+        "More honest than ROC at this class balance: a rare class can show a "
+        "great ROC while precision is near zero, because the false-positive "
+        "rate is diluted by a huge negative pool.",
+    "roc_curves":
+        "Familiar, and the basis of the AUC numbers. Read alongside PR rather "
+        "than instead of it.",
+    "confusion_matrix":
+        "What gets mistaken for what. Row-normalised, so a class holding 40% of "
+        "the data does not swamp every other row.",
+    "per_class_bars":
+        "Which classes are weak, sorted worst-first with sample counts — the "
+        "figure that tells you where to spend effort next.",
+    "calibration":
+        "Whether a score of 0.8 means 80%. If this bends below the diagonal the "
+        "model is overconfident and thresholds will not transfer to new data.",
+}
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────
@@ -56,6 +84,10 @@ class InferenceWorker(QThread):
         pin_memory: bool,
         use_amp: bool,
         save_json_path: str | None,
+        figure_dir: str | None = None,
+        figures: tuple | None = None,
+        figure_format: str = "png",
+        threshold_csv: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -67,6 +99,10 @@ class InferenceWorker(QThread):
         self._pin_memory    = pin_memory
         self._use_amp       = use_amp and str(device).startswith("cuda")
         self._save_json     = save_json_path
+        self._figure_dir    = figure_dir
+        self._figures       = tuple(figures or ())
+        self._figure_format = figure_format
+        self._threshold_csv = threshold_csv
         self._cancel_event  = threading.Event()
 
     def cancel(self) -> None:
@@ -127,7 +163,17 @@ class InferenceWorker(QThread):
                 )
 
             criterion = torch.nn.CrossEntropyLoss()
-            tracker   = MetricTracker(num_classes)
+            # Replay the targets the run was configured with, so the test
+            # split reports the same operating points as validation did.
+            recall_t = parse_target_list(str(hp.get("recall_targets", "")))
+            spec_t   = parse_target_list(str(hp.get("specificity_targets", "")))
+            tracker   = MetricTracker(num_classes,
+                                      recall_targets=recall_t,
+                                      specificity_targets=spec_t)
+            if recall_t or spec_t:
+                self.sig_log.emit(
+                    f"  Thresholds at recall={recall_t or None} "
+                    f"specificity={spec_t or None}")
             total     = len(test_loader)
             self.sig_log.emit(
                 f"Running inference on {self._device} "
@@ -153,7 +199,13 @@ class InferenceWorker(QThread):
                     self.sig_progress.emit(batch_idx + 1, total)
 
             metrics = tracker.compute()
-            payload = _metrics_to_jsonable(metrics, class_names=list(test_ds.classes))
+            # Captured before the tracker goes out of scope; every
+            # threshold-swept figure is drawn from these.
+            hists = tracker.score_histograms()
+            # The checkpoint's own names are authoritative; the H5 may have
+            # been rebuilt with a different class order since training.
+            names = list(ckpt.get("classes") or test_ds.classes)
+            payload = _metrics_to_jsonable(metrics, class_names=names)
             payload["checkpoint"] = os.path.abspath(self._ckpt_path)
             payload["h5_path"]    = os.path.abspath(self._h5_path)
             payload["device"]     = self._device
@@ -164,8 +216,41 @@ class InferenceWorker(QThread):
                 os.makedirs(os.path.dirname(os.path.abspath(self._save_json)) or ".",
                             exist_ok=True)
                 with open(self._save_json, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
+                    json.dump(payload, f, indent=2, allow_nan=False)
                 self.sig_log.emit(f"Saved metrics → {self._save_json}")
+
+            # ---- optional exports ----
+            if self._threshold_csv:
+                rows = build_threshold_table(metrics, names)
+                if rows:
+                    write_threshold_table(self._threshold_csv, rows, meta={
+                        "source_checkpoint": os.path.abspath(self._ckpt_path),
+                        "split": "test",
+                        "note": "Measured on the test split. Operating points "
+                                "intended for deployment should come from the "
+                                "validation split instead — see the Checkpoints tab.",
+                    })
+                    self.sig_log.emit(
+                        f"Saved {len(rows)} threshold rows -> {self._threshold_csv}")
+                else:
+                    self.sig_log.emit(
+                        "[WARN] No thresholds to export — the checkpoint has no "
+                        "recall/specificity targets recorded.")
+
+            if self._figure_dir and self._figures:
+                self.sig_log.emit(f"Rendering {len(self._figures)} figure(s)…")
+
+                def _prog(i, total, label):
+                    self.sig_log.emit(f"  [{i}/{total}] {label}")
+
+                paths = export_figures(
+                    self._figure_dir, hists, names, metrics,
+                    which=self._figures, fmt=self._figure_format,
+                    targets={"recall": recall_t, "specificity": spec_t},
+                    on_progress=_prog,
+                )
+                for pth in paths:
+                    self.sig_log.emit(f"  wrote {pth}")
 
             self.sig_done.emit(payload)
 
@@ -176,20 +261,15 @@ class InferenceWorker(QThread):
 
 
 def _metrics_to_jsonable(metrics: dict, class_names: list[str]) -> dict:
-    """Convert a MetricTracker result dict into JSON-serialisable form."""
+    """Convert a MetricTracker result dict into JSON-serialisable form.
+
+    class_names is attached once, at the top level. The previous version
+    recursed with itself, which re-seeded a "class_names" key inside every
+    nested dict — per_class_thresholds came out holding the class list instead
+    of its threshold tables.
+    """
     out: dict = {"class_names": list(class_names)}
-    for k, v in metrics.items():
-        if isinstance(v, np.ndarray):
-            out[k] = v.tolist()
-        elif isinstance(v, (np.floating, np.integer)):
-            out[k] = v.item()
-        elif isinstance(v, list):
-            out[k] = [x.item() if isinstance(x, (np.floating, np.integer)) else x
-                      for x in v]
-        elif isinstance(v, dict):
-            out[k] = _metrics_to_jsonable(v, class_names)
-        else:
-            out[k] = v
+    out.update({k: to_jsonable(v) for k, v in metrics.items()})
     return out
 
 
@@ -241,6 +321,66 @@ class InferencePanel(QWidget):
         self._save_json.toggled.connect(self._json_edit.setEnabled)
         self._save_json.toggled.connect(btn_browse_json.setEnabled)
 
+        # ── threshold table ───────────────────────────────────────────────
+        self._save_thresholds = QCheckBox("Save threshold table (CSV):")
+        self._save_thresholds.setToolTip(
+            "Per-class operating points measured on the TEST split.\n"
+            "Useful as a report. For thresholds you intend to deploy, use the "
+            "Checkpoints tab instead — those come from validation, and picking "
+            "an operating point on the same data you then score inflates it."
+        )
+        layout.addWidget(self._save_thresholds)
+
+        thr_row = QHBoxLayout()
+        self._thr_edit = QLineEdit()
+        self._thr_edit.setPlaceholderText("Output .csv path")
+        self._thr_edit.setEnabled(False)
+        thr_row.addWidget(self._thr_edit)
+        btn_browse_thr = QPushButton("Browse…")
+        btn_browse_thr.setEnabled(False)
+        btn_browse_thr.clicked.connect(self._on_browse_thresholds)
+        thr_row.addWidget(btn_browse_thr)
+        layout.addLayout(thr_row)
+        self._save_thresholds.toggled.connect(self._thr_edit.setEnabled)
+        self._save_thresholds.toggled.connect(btn_browse_thr.setEnabled)
+
+        # ── figures ───────────────────────────────────────────────────────
+        self._save_figures = QCheckBox("Export figures to folder:")
+        self._save_figures.setToolTip(
+            "Static PNG/PDF/SVG figures rendered from this run's results."
+        )
+        layout.addWidget(self._save_figures)
+
+        fig_row = QHBoxLayout()
+        self._fig_dir_edit = QLineEdit()
+        self._fig_dir_edit.setPlaceholderText("Output folder")
+        self._fig_dir_edit.setEnabled(False)
+        fig_row.addWidget(self._fig_dir_edit)
+        # Kept on self: _on_figures_toggled has to re-enable it, and a local
+        # would leave it disabled forever.
+        self._btn_browse_fig = QPushButton("Browse…")
+        self._btn_browse_fig.setEnabled(False)
+        self._btn_browse_fig.clicked.connect(self._on_browse_figdir)
+        fig_row.addWidget(self._btn_browse_fig)
+        self._fig_format = QComboBox()
+        self._fig_format.addItems(FORMATS)
+        self._fig_format.setEnabled(False)
+        self._fig_format.setToolTip("png for reports, pdf/svg to keep it vector")
+        fig_row.addWidget(self._fig_format)
+        layout.addLayout(fig_row)
+
+        # One checkbox per figure, defaults matching DEFAULT_FIGURES.
+        self._figure_boxes: dict[str, QCheckBox] = {}
+        for key, (_render, label) in FIGURES.items():
+            cb = QCheckBox(label)
+            cb.setChecked(key in DEFAULT_FIGURES)
+            cb.setEnabled(False)
+            cb.setToolTip(_FIGURE_TOOLTIPS.get(key, ""))
+            self._figure_boxes[key] = cb
+            layout.addWidget(cb)
+
+        self._save_figures.toggled.connect(self._on_figures_toggled)
+
         # ── run / cancel ──────────────────────────────────────────────────
         run_row = QHBoxLayout()
         self._btn_run    = QPushButton("▶  Run Inference")
@@ -270,6 +410,12 @@ class InferencePanel(QWidget):
         if self._save_json.isChecked() and not self._json_edit.text().strip():
             base, _ = os.path.splitext(ckpt_path)
             self._json_edit.setText(base + "_test_metrics.json")
+        if self._save_thresholds.isChecked() and not self._thr_edit.text().strip():
+            base, _ = os.path.splitext(ckpt_path)
+            self._thr_edit.setText(base + "_test_thresholds.csv")
+        if self._save_figures.isChecked() and not self._fig_dir_edit.text().strip():
+            self._fig_dir_edit.setText(
+                os.path.join(os.path.dirname(ckpt_path), "figures"))
 
     def _on_browse_ckpt(self) -> None:
         s = self._settings.get_settings()
@@ -281,6 +427,26 @@ class InferencePanel(QWidget):
         if path:
             self._ckpt_edit.setText(path)
             self._autofill_json_path(path)
+
+    def _on_figures_toggled(self, on: bool) -> None:
+        self._fig_dir_edit.setEnabled(on)
+        self._btn_browse_fig.setEnabled(on)
+        self._fig_format.setEnabled(on)
+        for cb in self._figure_boxes.values():
+            cb.setEnabled(on)
+
+    def _on_browse_thresholds(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save threshold table", self._thr_edit.text() or "",
+            "CSV (*.csv);;JSON (*.json);;All files (*)")
+        if path:
+            self._thr_edit.setText(path)
+
+    def _on_browse_figdir(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Select figure output folder", self._fig_dir_edit.text() or "")
+        if path:
+            self._fig_dir_edit.setText(path)
 
     def _on_browse_json(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -310,6 +476,24 @@ class InferencePanel(QWidget):
                                 "Output JSON path is empty.")
             return
 
+        thr_csv = self._thr_edit.text().strip() if self._save_thresholds.isChecked() else None
+        if self._save_thresholds.isChecked() and not thr_csv:
+            QMessageBox.warning(self, "Cannot run inference",
+                                "Threshold table path is empty.")
+            return
+
+        fig_dir = self._fig_dir_edit.text().strip() if self._save_figures.isChecked() else None
+        chosen = tuple(k for k, cb in self._figure_boxes.items() if cb.isChecked())
+        if self._save_figures.isChecked():
+            if not fig_dir:
+                QMessageBox.warning(self, "Cannot run inference",
+                                    "Figure output folder is empty.")
+                return
+            if not chosen:
+                QMessageBox.warning(self, "Cannot run inference",
+                                    "No figures selected.")
+                return
+
         self._worker = InferenceWorker(
             checkpoint_path=ckpt,
             h5_path=h5,
@@ -319,6 +503,10 @@ class InferencePanel(QWidget):
             pin_memory=bool(s.get("pin_memory", False)),
             use_amp=bool(s.get("use_amp", False)),
             save_json_path=save_json,
+            figure_dir=fig_dir,
+            figures=chosen,
+            figure_format=self._fig_format.currentText(),
+            threshold_csv=thr_csv,
         )
         self._worker.sig_log.connect(self.sig_log_message)
         self._worker.sig_progress.connect(self._on_progress)

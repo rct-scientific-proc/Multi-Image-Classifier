@@ -19,10 +19,23 @@ Available metrics (keys in the dict returned by compute()):
     per_class_accuracy    — list[float], one value per class
     per_class_specificity — list[float], one value per class
     per_class_auc         — list[float], one value per class (nan if class absent in epoch)
+    per_class_support     — list[int], ground-truth sample count per class
     per_class_thresholds  — dict[str, list[dict]]: keyed by target recall (e.g. "0.99"),
-                            each entry per class has {threshold, precision, recall}.
-                            Only present when recall_targets is provided.
+                            each entry per class has
+                            {threshold, precision, recall, specificity}.
+                            Populated only when recall_targets is provided.
+    per_class_thresholds_specificity
+                          — same shape, keyed by target specificity. Populated
+                            only when specificity_targets is provided.
     confusion_matrix      — np.ndarray (num_classes, num_classes)
+
+Thresholds are operating points, and are only meaningful when chosen on data the
+model was not fitted to — the Trainer computes them on the validation split.
+Applying them to fresh data is the intended use; re-deriving them on the same
+data you then report precision for is self-fulfilling.
+
+build_threshold_table() / write_threshold_table() flatten them into the CSV or
+JSON you would ship alongside a model.
 
 Score-based metrics (AUC and the recall thresholds) are accumulated into
 fixed-width per-class probability histograms rather than by retaining every
@@ -36,6 +49,11 @@ Usage:
     summary = tracker.compute()
     tracker.reset()
 """
+
+import csv
+import json
+import math
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -114,22 +132,70 @@ def _threshold_at_recall_from_hist(pos_hist: np.ndarray, neg_hist: np.ndarray,
 
     tp        = float(cum_tp[k])
     fp        = float(cum_fp[k])
+    n_neg     = float(neg_hist.sum())
     threshold = float(bins - 1 - k) / float(bins)
     precision = tp / max(tp + fp, 1.0)
     recall    = tp / float(n_pos)
-    return {"threshold": threshold, "precision": precision, "recall": recall}
+    spec      = 1.0 - (fp / n_neg) if n_neg > 0 else float("nan")
+    return {"threshold": threshold, "precision": precision,
+            "recall": recall, "specificity": spec}
+
+
+def _threshold_at_specificity_from_hist(pos_hist: np.ndarray, neg_hist: np.ndarray,
+                                        target_specificity: float) -> dict:
+    """Lowest probability threshold whose one-vs-rest specificity ≥ target.
+
+    The mirror of _threshold_at_recall_from_hist. Specificity is
+    ``TN / (TN + FP)`` and ``TN + FP`` is just the negative count, so a
+    specificity floor is a false-positive budget: admit as many samples as
+    possible while keeping ``cum_fp`` within it. Taking the *largest* such set
+    (lowest threshold) maximises recall at the requested specificity.
+
+    Returns {threshold, precision, recall, specificity}. All NaN when the class
+    has no negatives; a target no operating point can meet yields a threshold of
+    1.0, i.e. admit nothing.
+    """
+    n_pos = float(pos_hist.sum())
+    n_neg = float(neg_hist.sum())
+    if n_neg == 0:
+        return {"threshold": float("nan"), "precision": float("nan"),
+                "recall": float("nan"), "specificity": float("nan")}
+
+    bins   = len(pos_hist)
+    cum_tp = np.cumsum(pos_hist[::-1])
+    cum_fp = np.cumsum(neg_hist[::-1])
+
+    # How many false positives the specificity floor permits.
+    allowed_fp = np.floor(n_neg * (1.0 - float(target_specificity)))
+    k = int(np.searchsorted(cum_fp, allowed_fp, side="right")) - 1
+
+    if k < 0:
+        # Even the top-scoring bin blows the budget: predict nothing positive.
+        return {"threshold": 1.0, "precision": float("nan"),
+                "recall": 0.0, "specificity": 1.0}
+
+    tp, fp = float(cum_tp[k]), float(cum_fp[k])
+    return {
+        "threshold":   float(bins - 1 - k) / float(bins),
+        "precision":   tp / max(tp + fp, 1.0),
+        "recall":      tp / n_pos if n_pos > 0 else float("nan"),
+        "specificity": 1.0 - (fp / n_neg),
+    }
 
 
 class MetricTracker:
     """Accumulates per-batch stats and computes epoch-level metrics."""
 
     def __init__(self, num_classes: int, recall_targets: list[float] | None = None,
-                 score_bins: int = SCORE_BINS):
+                 score_bins: int = SCORE_BINS,
+                 specificity_targets: list[float] | None = None):
         self.num_classes    = num_classes
         self._top_k         = min(5, num_classes)
         self._bins          = max(2, int(score_bins))
         self.recall_targets = sorted({float(r) for r in (recall_targets or [])
                                       if 0.0 < float(r) <= 1.0})
+        self.specificity_targets = sorted({float(s) for s in (specificity_targets or [])
+                                           if 0.0 < float(s) <= 1.0})
         self.reset()
 
     def reset(self):
@@ -192,6 +258,16 @@ class MetricTracker:
                                       minlength=size).reshape(n_cls, bins)
         self._neg_hist += np.bincount(flat[~is_pos],
                                       minlength=size).reshape(n_cls, bins)
+
+    def score_histograms(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-class (positive, negative) score histograms, ascending-score bins.
+
+        These are the raw material every threshold-swept curve is drawn from.
+        Exposed as copies so a caller can hold them after the tracker is gone —
+        the alternative, retaining every probability vector, is what the
+        histogram design exists to avoid.
+        """
+        return self._pos_hist.copy(), self._neg_hist.copy()
 
     def compute(self) -> dict:
         """Return a dict of all metrics for the epoch."""
@@ -273,6 +349,16 @@ class MetricTracker:
                 for c in range(self.num_classes)
             ]
 
+        # ---- and at target specificity, from the same histograms ----
+        per_class_thresholds_spec: dict[str, list[dict]] = {}
+        for sp in self.specificity_targets:
+            key = f"{sp:.2f}"
+            per_class_thresholds_spec[key] = [
+                _threshold_at_specificity_from_hist(self._pos_hist[c],
+                                                    self._neg_hist[c], sp)
+                for c in range(self.num_classes)
+            ]
+
         return {
             "avg_loss":             avg_loss,
             "accuracy":             accuracy,
@@ -291,7 +377,196 @@ class MetricTracker:
             "per_class_accuracy":   per_class_accuracy,
             "per_class_specificity": list(specificity_c.tolist()),
             "per_class_auc":        per_class_auc,
+            # Ground-truth count per class. A threshold read off 3 samples means
+            # something very different from one read off 3000, and the confusion
+            # matrix it could otherwise be derived from is stripped from
+            # checkpoints, so it is surfaced explicitly.
+            "per_class_support":    [int(v) for v in support],
             "per_class_thresholds": per_class_thresholds,
+            "per_class_thresholds_specificity": per_class_thresholds_spec,
             "confusion_matrix":     C.copy(),
         }
 
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers — parsing, JSON coercion, threshold tables
+# ---------------------------------------------------------------------------
+
+def parse_target_list(text: str) -> list[float]:
+    """Parse "0.95, 0.99" into [0.95, 0.99], dropping anything outside (0, 1].
+
+    Shared by the recall-target and specificity-target fields, and by the
+    inference worker when it replays a checkpoint's targets.
+    """
+    out: list[float] = []
+    for tok in (text or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if 0.0 < v <= 1.0:
+            out.append(v)
+    return sorted(set(out))
+
+
+def to_jsonable(obj):
+    """Recursively convert numpy / torch / non-finite values to JSON-safe ones.
+
+    NaN is mapped to None rather than left alone: json.dump would emit a bare
+    ``NaN`` token, which is not valid JSON and is rejected by most parsers.
+    Absent classes legitimately produce NaN thresholds, so this is the common
+    case, not an edge one.
+    """
+    if isinstance(obj, dict):
+        return {str(k): to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return to_jsonable(obj.tolist())
+    if isinstance(obj, torch.Tensor):
+        return to_jsonable(obj.detach().cpu().tolist())
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (np.floating, float)):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
+
+
+# Column order for the exported table — class identity first, then the
+# operating point, then what it buys you.
+THRESHOLD_TABLE_COLUMNS = (
+    "class_index", "class_name", "support",
+    "criterion", "target", "threshold",
+    "precision", "recall", "specificity",
+)
+
+
+def build_threshold_table(metrics: dict, class_names: list[str] | None = None) -> list[dict]:
+    """Flatten per-class thresholds into one row per (class, criterion, target).
+
+    *metrics* is a MetricTracker.compute() result — or the ``metrics`` dict from
+    a checkpoint, which carries the same keys. Names are optional; without them
+    the rows fall back to ``class_<i>`` so the table is still usable.
+
+    Rows are emitted for both criteria, so a reader can compare "the cutoff that
+    gets me 99% recall" against "the cutoff that gets me 99% specificity" for
+    the same class side by side.
+    """
+    names = list(class_names or [])
+    support = metrics.get("per_class_support") or []
+    rows: list[dict] = []
+
+    for criterion, key in (("recall", "per_class_thresholds"),
+                           ("specificity", "per_class_thresholds_specificity")):
+        table = metrics.get(key) or {}
+        for target in sorted(table, key=lambda t: float(t)):
+            for idx, entry in enumerate(table[target]):
+                rows.append({
+                    "class_index": idx,
+                    "class_name":  names[idx] if idx < len(names) else f"class_{idx}",
+                    "support":     int(support[idx]) if idx < len(support) else None,
+                    "criterion":   criterion,
+                    "target":      float(target),
+                    "threshold":   entry.get("threshold"),
+                    "precision":   entry.get("precision"),
+                    "recall":      entry.get("recall"),
+                    "specificity": entry.get("specificity"),
+                })
+
+    rows.sort(key=lambda r: (r["class_index"], r["criterion"], r["target"]))
+    return [to_jsonable(r) for r in rows]
+
+
+def write_threshold_table(
+    path: str | Path,
+    rows: list[dict],
+    meta: dict | None = None,
+) -> Path:
+    """Write *rows* as CSV or JSON, chosen by the file extension.
+
+    CSV is the default because this table is meant to be read by a human
+    deciding operating points, and opened in a spreadsheet. JSON keeps the
+    *meta* block (source checkpoint, epoch, split) that CSV has nowhere to put.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.suffix.lower() == ".json":
+        payload = {"meta": to_jsonable(meta or {}), "thresholds": rows}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, allow_nan=False)
+        return path
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(THRESHOLD_TABLE_COLUMNS))
+        writer.writeheader()
+        for r in rows:
+            # None -> "" so a missing value reads as blank rather than "None".
+            writer.writerow({k: ("" if r.get(k) is None else r.get(k))
+                             for k in THRESHOLD_TABLE_COLUMNS})
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Threshold sweeps — the curves every operating-point figure is drawn from
+# ---------------------------------------------------------------------------
+
+def sweep_from_hist(pos_hist: np.ndarray, neg_hist: np.ndarray) -> dict:
+    """Every one-vs-rest rate as a function of threshold, in one pass.
+
+    ROC, precision-recall and the recall/specificity trade-off are three views
+    of this same sweep, so they are computed once rather than three times.
+    Arrays run from the highest threshold (admit nothing) to the lowest.
+    """
+    bins   = len(pos_hist)
+    n_pos  = float(pos_hist.sum())
+    n_neg  = float(neg_hist.sum())
+    cum_tp = np.cumsum(pos_hist[::-1]).astype(float)
+    cum_fp = np.cumsum(neg_hist[::-1]).astype(float)
+
+    nan = np.full(bins, np.nan)
+    recall = cum_tp / n_pos if n_pos > 0 else nan
+    fpr    = cum_fp / n_neg if n_neg > 0 else nan
+    return {
+        "threshold":   (bins - 1 - np.arange(bins)) / float(bins),
+        "recall":      recall,
+        "specificity": 1.0 - fpr,
+        "fpr":         fpr,
+        "precision":   cum_tp / np.maximum(cum_tp + cum_fp, 1.0),
+        "n_pos":       n_pos,
+        "n_neg":       n_neg,
+    }
+
+
+def calibration_from_hist(pos_hist: np.ndarray, neg_hist: np.ndarray,
+                          n_bins: int = 20) -> dict:
+    """Observed positive rate vs predicted probability, coarsely binned.
+
+    Answers "when this model says 0.8, is it right 80% of the time?" — which is
+    what decides whether a threshold chosen on validation still means the same
+    thing on new data. Bins with no samples are dropped rather than plotted as
+    zero, and each bin's weight is returned so a reader can discount the sparse
+    high-confidence end.
+    """
+    bins    = len(pos_hist)
+    edges   = np.linspace(0, bins, n_bins + 1).astype(int)
+    centres = (np.arange(bins) + 0.5) / bins
+
+    pred, obs, count = [], [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        w = pos_hist[a:b] + neg_hist[a:b]
+        total = float(w.sum())
+        if total == 0:
+            continue
+        pred.append(float((centres[a:b] * w).sum() / total))
+        obs.append(float(pos_hist[a:b].sum() / total))
+        count.append(int(total))
+    return {"predicted": np.array(pred), "observed": np.array(obs),
+            "count": np.array(count)}

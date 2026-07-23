@@ -52,6 +52,7 @@ def save_checkpoint(
     keep_last: int = 3,
     target_metric: str = "accuracy",
     model_name: str | None = None,
+    classes: list[str] | None = None,
 ) -> Path:
     """Save a checkpoint and maintain a rolling window of the last N files.
 
@@ -78,6 +79,10 @@ def save_checkpoint(
         "metrics":              {k: v for k, v in metrics.items()
                                  if not hasattr(v, "__array__")},
         "hyperparams":          hyperparams,
+        # Without this, every per-class array in the payload (thresholds,
+        # specificity, support) is an anonymous index-ordered list and nothing
+        # downstream can say which entry is which class.
+        "classes":              list(classes) if classes else [],
     }
     torch.save(payload, path)
 

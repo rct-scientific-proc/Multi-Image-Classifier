@@ -131,6 +131,33 @@ is involved, so you can validate the core logic independently.
 
 ---
 
+## Phase 14 — Operating points (thresholds) for downstream inference
+
+- [x] Checkpoints store `classes`, so every per-class array in the payload
+      (thresholds, specificity, support) is self-describing instead of an
+      anonymous index-ordered list
+- [x] `InferenceWorker` replays the checkpoint's own `recall_targets` /
+      `specificity_targets` — it previously built `MetricTracker(num_classes)`
+      with none, so the test split computed no thresholds at all
+- [x] Fixed `_metrics_to_jsonable` recursing with itself, which injected a
+      `class_names` key into every nested dict and left `per_class_thresholds`
+      holding the class list instead of its tables. Now delegates to
+      `src.metrics.to_jsonable`, which also maps NaN -> null (a bare `NaN`
+      token is not valid JSON, and absent classes produce them routinely).
+- [x] `_threshold_at_specificity_from_hist()` — the mirror of the recall
+      version, off the same histograms. Recall entries now also report the
+      specificity you get there, and vice versa.
+- [x] `per_class_support` exposed — a threshold read off 3 samples is not the
+      same as one read off 3000, and the confusion matrix it could be derived
+      from is stripped from checkpoints
+- [x] `build_threshold_table()` / `write_threshold_table()` + "Export
+      thresholds…" on the Checkpoints tab — one row per (class, criterion,
+      target) as CSV or JSON, the artifact to ship with a model
+- [x] Shared `parse_target_list()` / `to_jsonable()` in `src/metrics.py`,
+      replacing three near-duplicate copies
+
+---
+
 ## Suggested file structure
 
 ```

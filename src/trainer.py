@@ -83,6 +83,7 @@ class Trainer:
         keep_last: int = 3,
         criterion: nn.Module | None = None,
         recall_targets: list[float] | None = None,
+        specificity_targets: list[float] | None = None,
         use_amp: bool = False,
         augment: "GpuAugment | None" = None,
         normalizer: "Normalizer | None" = None,
@@ -104,6 +105,8 @@ class Trainer:
         self.keep_last     = keep_last
         self._class_names  = list(train_loader.dataset.classes)
         self.recall_targets = list(recall_targets) if recall_targets else []
+        self.specificity_targets = (list(specificity_targets)
+                                    if specificity_targets else [])
         # AMP is only meaningful on CUDA; silently disable elsewhere
         self.use_amp       = bool(use_amp) and str(device).startswith("cuda")
         self._scaler       = torch.amp.GradScaler("cuda", enabled=self.use_amp)
@@ -140,7 +143,9 @@ class Trainer:
         self.model.train()
         if self.augment is not None:
             self.augment.train()          # matches the module's own eval guard
-        tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
+        tracker = MetricTracker(self._num_classes,
+                                 recall_targets=self.recall_targets,
+                                 specificity_targets=self.specificity_targets)
 
         for batch_idx, (images, labels, _gt) in enumerate(self.train_loader):
             if self.cancel_event.is_set():
@@ -177,7 +182,9 @@ class Trainer:
         self.model.eval()
         if self.augment is not None:
             self.augment.eval()           # belt and braces; not called below
-        tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
+        tracker = MetricTracker(self._num_classes,
+                                 recall_targets=self.recall_targets,
+                                 specificity_targets=self.specificity_targets)
 
         for images, labels, _gt in self.val_loader:
             images = images.to(self.device, non_blocking=True)
@@ -276,6 +283,7 @@ class Trainer:
                 keep_last=self.keep_last,
                 target_metric=self.target_metric,
                 model_name=str(hyperparams.get("backbone", "")) or type(self.model).__name__,
+                classes=self._class_names,
             )
 
             if self.logger is not None:

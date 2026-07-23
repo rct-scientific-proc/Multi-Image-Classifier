@@ -136,14 +136,20 @@ class ExperimentLogger:
             w.add_scalar(f"val/per_class/accuracy_{name}",     acc_c,  epoch)
             w.add_scalar(f"val/per_class/specificity_{name}",  spec_c, epoch)
 
-        # ---- per-class probability thresholds at target recall(s) ----
-        for r_key, entries in val_m.get("per_class_thresholds", {}).items():
-            for c, name in enumerate(class_names):
-                e = entries[c]
-                if np.isnan(e["threshold"]):
-                    continue
-                w.add_scalar(f"val/threshold@r{r_key}/{name}", e["threshold"], epoch)
-                w.add_scalar(f"val/precision@r{r_key}/{name}", e["precision"], epoch)
+        # ---- per-class probability thresholds at target recall / specificity ----
+        for tag, key in (("r", "per_class_thresholds"),
+                         ("s", "per_class_thresholds_specificity")):
+            for t_key, entries in val_m.get(key, {}).items():
+                for c, name in enumerate(class_names):
+                    e = entries[c]
+                    if np.isnan(e.get("threshold", float("nan"))):
+                        continue
+                    w.add_scalar(f"val/threshold@{tag}{t_key}/{name}",
+                                 e["threshold"], epoch)
+                    for field in ("precision", "recall", "specificity"):
+                        v = e.get(field)
+                        if v is not None and not np.isnan(v):
+                            w.add_scalar(f"val/{field}@{tag}{t_key}/{name}", v, epoch)
 
         # ---- confusion matrix image ----
         cm_tensor = _confusion_matrix_image(val_m["confusion_matrix"], class_names)

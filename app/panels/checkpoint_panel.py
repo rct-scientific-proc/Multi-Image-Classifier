@@ -5,11 +5,9 @@ Checkpoint panel — list .pt checkpoints, resume from selected, export best.
 from __future__ import annotations
 
 import json
-import math
 import shutil
 from pathlib import Path
 
-import numpy as np
 import torch
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -24,32 +22,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-
-def _json_default(obj):
-    """Fallback for json.dump — handles types _to_jsonable misses."""
-    if isinstance(obj, torch.Tensor):
-        return _to_jsonable(obj.detach().cpu().tolist())
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serialisable")
-
-
-def _to_jsonable(obj):
-    """Recursively convert numpy / NaN / tensor values to JSON-safe primitives."""
-    if isinstance(obj, dict):
-        return {str(k): _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(v) for v in obj]
-    if isinstance(obj, np.ndarray):
-        return _to_jsonable(obj.tolist())
-    if isinstance(obj, torch.Tensor):
-        return _to_jsonable(obj.detach().cpu().tolist())
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        v = float(obj)
-        return v if math.isfinite(v) else None
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
-    return obj
+from src.metrics import (
+    build_threshold_table, to_jsonable, write_threshold_table,
+)
 
 
 class CheckpointPanel(QWidget):
@@ -112,14 +87,28 @@ class CheckpointPanel(QWidget):
         top_row.addWidget(self._btn_refresh)
         box_lay.addLayout(top_row)
 
+        self._btn_export_thresholds = QPushButton("Export thresholds…")
+        self._btn_export_thresholds.setEnabled(False)
+        self._btn_export_thresholds.setToolTip(
+            "Write the per-class operating points — threshold, precision, recall "
+            "and specificity at each configured target — as CSV or JSON.\n"
+            "This is the table to ship alongside a model when applying it to new "
+            "data. Thresholds come from the validation split, never the test set."
+        )
+
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self._btn_export)
         bottom_row.addWidget(self._btn_export_metrics)
         box_lay.addLayout(bottom_row)
 
+        third_row = QHBoxLayout()
+        third_row.addWidget(self._btn_export_thresholds)
+        box_lay.addLayout(third_row)
+
         self._btn_resume.clicked.connect(self._on_resume)
         self._btn_export.clicked.connect(self._on_export)
         self._btn_export_metrics.clicked.connect(self._on_export_metrics)
+        self._btn_export_thresholds.clicked.connect(self._on_export_thresholds)
         self._btn_refresh.clicked.connect(lambda: self.refresh(self._ck_dir))
 
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
@@ -170,6 +159,7 @@ class CheckpointPanel(QWidget):
 
         self._btn_export.setEnabled(best.exists())
         self._btn_export_metrics.setEnabled(best.exists() or bool(files))
+        self._btn_export_thresholds.setEnabled(best.exists() or bool(files))
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -229,12 +219,76 @@ class CheckpointPanel(QWidget):
             return
         try:
             with open(dst, "w", encoding="utf-8") as f:
-                json.dump(_to_jsonable(payload), f, indent=2,
-                          default=_json_default, allow_nan=False)
+                json.dump(to_jsonable(payload), f, indent=2, allow_nan=False)
         except (OSError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "Export metrics", f"Write failed:\n{exc}")
             return
         QMessageBox.information(self, "Export metrics", f"Saved to:\n{dst}")
+
+    def _on_export_thresholds(self) -> None:
+        """Export the per-class operating-point table for the selected checkpoint."""
+        src, default_name = self._selected_or_best("_thresholds.csv")
+        if src is None:
+            return
+        try:
+            ckpt = torch.load(src, weights_only=True, map_location="cpu")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export thresholds",
+                                 f"Failed to load checkpoint:\n{exc}")
+            return
+
+        metrics = ckpt.get("metrics", {}) or {}
+        rows = build_threshold_table(metrics, ckpt.get("classes") or [])
+        if not rows:
+            QMessageBox.information(
+                self, "Export thresholds",
+                "This checkpoint has no threshold data.\n\n"
+                "Set 'Recall targets' and/or 'Specificity targets' in "
+                "Settings ▸ Output before training — thresholds are computed "
+                "during validation, so they cannot be recovered afterwards."
+            )
+            return
+        if not ckpt.get("classes"):
+            QMessageBox.warning(
+                self, "Export thresholds",
+                "This checkpoint predates class names being stored, so rows are "
+                "labelled class_0, class_1, … in dataset order."
+            )
+
+        dst, _ = QFileDialog.getSaveFileName(
+            self, "Export threshold table", default_name,
+            "CSV (*.csv);;JSON (*.json);;All files (*)"
+        )
+        if not dst:
+            return
+        try:
+            write_threshold_table(dst, rows, meta={
+                "source_checkpoint": str(src),
+                "epoch": ckpt.get("epoch"),
+                "split": "validation",
+                "backbone": (ckpt.get("hyperparams") or {}).get("backbone"),
+                "note": "Thresholds were selected on the validation split. Apply "
+                        "them unchanged to new data; re-fitting them on the data "
+                        "you then score inflates the reported precision.",
+            })
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Export thresholds", f"Write failed:\n{exc}")
+            return
+        QMessageBox.information(
+            self, "Export thresholds",
+            f"Wrote {len(rows)} rows to:\n{dst}")
+
+    def _selected_or_best(self, suffix: str):
+        """Return (path, default_export_name) for the selection, else best.pt."""
+        items = self._list.selectedItems()
+        if items:
+            src = Path(items[0].data(Qt.UserRole))
+            return src, src.stem + suffix
+        src = Path(self._ck_dir) / "best.pt"
+        if not src.exists():
+            QMessageBox.warning(self, "Export", f"{src.name} not found.")
+            return None, None
+        return src, "best" + suffix
 
     def _on_inspect(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)

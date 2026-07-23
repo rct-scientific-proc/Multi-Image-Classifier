@@ -103,6 +103,7 @@ _DEFAULTS: dict = {
     "shuffle_every_n_epochs": 1,
     "keep_last":        3,
     "recall_targets":   "0.95, 0.99",
+    "specificity_targets": "0.95, 0.99",
     "theme":            DEFAULT_THEME,
     "seed":             0,
     # Preprocessing — applies to train, validation and inference alike.
@@ -426,6 +427,19 @@ class SettingsPanel(QWidget):
         )
         out_lay.addRow("Recall targets:", self._recall_targets)
 
+        self._specificity_targets = QLineEdit("0.95, 0.99")
+        self._specificity_targets.setPlaceholderText(
+            "e.g. 0.95, 0.99 — leave blank to disable")
+        self._specificity_targets.setToolTip(
+            "Comma-separated target specificity values in (0, 1]. The mirror of "
+            "recall targets: for each value the validation epoch logs the per-class "
+            "probability threshold (one-vs-rest) holding false positives to that "
+            "specificity, plus the recall and precision you get there.\n"
+            "Use recall targets when missing a positive is the expensive error, "
+            "and specificity targets when a false alarm is."
+        )
+        out_lay.addRow("Specificity targets:", self._specificity_targets)
+
         self._checkpoint_dir = QLineEdit("checkpoints")
         btn_ck = QPushButton("Browse…")
         btn_ck.clicked.connect(lambda: self._browse_dir(self._checkpoint_dir))
@@ -655,6 +669,8 @@ class SettingsPanel(QWidget):
         self._keep_last.setValue(int(s.get("keep_last", 3)))
         self._shuffle_every.setValue(int(s.get("shuffle_every_n_epochs", 1)))
         self._recall_targets.setText(str(s.get("recall_targets", "0.95, 0.99")))
+        self._specificity_targets.setText(
+            str(s.get("specificity_targets", "0.95, 0.99")))
         self._pin_memory.setChecked(bool(s.get("pin_memory", torch.cuda.is_available())))
         self._use_amp.setChecked(bool(s.get("use_amp", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
@@ -710,6 +726,7 @@ class SettingsPanel(QWidget):
             "shuffle_every_n_epochs": self._shuffle_every.value(),
             "keep_last":        self._keep_last.value(),
             "recall_targets":   self._recall_targets.text().strip(),
+            "specificity_targets": self._specificity_targets.text().strip(),
             "target_metric":    self._target_metric.currentText(),
             "device":           self._device.currentData(),
             "resume_checkpoint": self._resume_edit.text().strip(),
