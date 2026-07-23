@@ -7,6 +7,32 @@ name = "image_classifier"
 version = "0.1.0"
 requires-python = ">=3.11"
 
+# NOTE: plain `pip install -e .` pulls the CPU-only torch wheel from PyPI, which
+# silently disables AMP and the GPU entries in the settings panel. For a CUDA
+# build, install torch/torchvision first from the PyTorch index, then this:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install -e .
+dependencies = [
+    # torch.amp.GradScaler("cuda", ...) — the generic-device form — landed in 2.4
+    "torch>=2.4",
+    "torchvision>=0.19",      # pairs with torch 2.4
+    # src/metrics.py uses np.trapezoid, added in NumPy 2.0 (np.trapz before that)
+    "numpy>=2.0",
+    "h5py>=3.0",              # Dataset.asstr() is h5py 3.0+
+    "PyQt5>=5.15",
+    # Needed both by torch.utils.tensorboard.SummaryWriter and by the
+    # TensorBoard panel, which shells out to the `tensorboard` executable.
+    "tensorboard",
+    # Confusion-matrix images. src/logger.py degrades silently without these,
+    # so they are required rather than optional.
+    "matplotlib",
+    "pillow",
+]
+
+[project.optional-dependencies]
+# Only for: python -m src.h5_repack repack --compression lz4
+lz4 = ["hdf5plugin"]
+
 [project.scripts]
 image-classifier = "app.main:main"
 
