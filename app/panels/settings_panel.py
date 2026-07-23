@@ -16,17 +16,16 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QPushButton,
-    QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.panels.common import fit_tabs, scrollable
 from src.metrics import DEFAULT_TARGET_METRIC, TARGET_METRICS
 from src.model import AVAILABLE_BACKBONES
 
@@ -68,22 +67,29 @@ class SettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # ── scrollable container ──────────────────────────────────────────
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        scroll.setWidget(inner)
-        form = QFormLayout(inner)
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-
+        # ── tabbed container ──────────────────────────────────────────────
+        # One 24-row form meant every new option lengthened a single 1025px
+        # scroll. Five pages of ~7 rows each leaves room to grow per topic.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        self._tabs = QTabWidget()
+        outer.addWidget(self._tabs)
 
-        # ── Dataset ───────────────────────────────────────────────────────
-        ds_box = QGroupBox("Dataset")
-        ds_lay = QFormLayout(ds_box)
+        def _page(title: str) -> QFormLayout:
+            """Add a scrollable form page and return its layout."""
+            page = QWidget()
+            lay  = QFormLayout(page)
+            lay.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            self._tabs.addTab(scrollable(page), title)
+            return lay
 
+        ds_lay    = _page("Data")
+        model_lay = _page("Model")
+        train_lay = _page("Optimizer")
+        hw_lay    = _page("Hardware")
+        out_lay   = _page("Output")
+
+        # ── Data ──────────────────────────────────────────────────────────
         self._h5_edit = QLineEdit()
         self._h5_edit.setPlaceholderText("Path to .h5 dataset file")
         btn_browse_h5 = QPushButton("Browse…")
@@ -98,12 +104,16 @@ class SettingsPanel(QWidget):
         self._in_channels.setValue(1)
         ds_lay.addRow("Input channels:", self._in_channels)
 
-        form.addRow(ds_box)
+        self._shuffle_every = QSpinBox()
+        self._shuffle_every.setRange(0, 9999)
+        self._shuffle_every.setValue(1)
+        self._shuffle_every.setToolTip(
+            "How often (in epochs) to re-shuffle the training data.\n"
+            "1 = every epoch (default), N = every N epochs, 0 = never shuffle."
+        )
+        ds_lay.addRow("Shuffle every N epochs:", self._shuffle_every)
 
         # ── Model ─────────────────────────────────────────────────────────
-        model_box = QGroupBox("Model")
-        model_lay = QFormLayout(model_box)
-
         self._backbone = QComboBox()
         self._backbone.addItems(AVAILABLE_BACKBONES)
         self._backbone.currentTextChanged.connect(self._on_backbone_changed)
@@ -112,12 +122,7 @@ class SettingsPanel(QWidget):
         self._pretrained = QCheckBox("Use pretrained weights")
         model_lay.addRow("", self._pretrained)
 
-        form.addRow(model_box)
-
-        # ── Training ──────────────────────────────────────────────────────
-        train_box = QGroupBox("Training")
-        train_lay = QFormLayout(train_box)
-
+        # ── Optimizer ─────────────────────────────────────────────────────
         self._optimizer = QComboBox()
         self._optimizer.addItems(["Adam", "AdamW", "SGD", "RMSprop"])
         train_lay.addRow("Optimizer:", self._optimizer)
@@ -164,63 +169,7 @@ class SettingsPanel(QWidget):
         self._epochs.setValue(10)
         train_lay.addRow("Epochs:", self._epochs)
 
-        self._num_workers = QSpinBox()
-        self._num_workers.setRange(0, 32)
-        self._num_workers.setValue(0)
-        self._num_workers.setToolTip(
-            "Number of DataLoader worker processes.\n"
-            "On Windows + CUDA, set to 0: each worker re-imports torch and "
-            "commits ~1 GB of virtual memory for the CUDA DLLs, which often "
-            "exceeds the default Windows page-file size (WinError 1455)."
-        )
-        train_lay.addRow("DataLoader workers:", self._num_workers)
-
-        self._pin_memory = QCheckBox("Pin memory (faster CPU→GPU transfer)")
-        self._pin_memory.setChecked(torch.cuda.is_available())
-        self._pin_memory.setToolTip(
-            "Enables pinned (page-locked) memory in the DataLoader.\n"
-            "Only beneficial when training on a CUDA GPU."
-        )
-        train_lay.addRow("", self._pin_memory)
-
-        self._use_amp = QCheckBox("Mixed precision (fp16 autocast)")
-        self._use_amp.setChecked(torch.cuda.is_available())
-        self._use_amp.setToolTip(
-            "Use automatic mixed precision (torch.cuda.amp) during training and validation.\n"
-            "Typically 1.5–3× faster and ~40% less GPU memory on Tensor Core GPUs\n"
-            "(Volta/Turing/Ampere/Ada). Silently disabled on CPU."
-        )
-        train_lay.addRow("", self._use_amp)
-
-        self._shuffle_every = QSpinBox()
-        self._shuffle_every.setRange(0, 9999)
-        self._shuffle_every.setValue(1)
-        self._shuffle_every.setToolTip(
-            "How often (in epochs) to re-shuffle the training data.\n"
-            "1 = every epoch (default), N = every N epochs, 0 = never shuffle."
-        )
-        train_lay.addRow("Shuffle every N epochs:", self._shuffle_every)
-
-        self._keep_last = QSpinBox()
-        self._keep_last.setRange(1, 100)
-        self._keep_last.setValue(3)
-        self._keep_last.setToolTip("Number of recent epoch checkpoints to keep on disk (best.pt is always kept)")
-        train_lay.addRow("Keep last N checkpoints:", self._keep_last)
-
-        self._target_metric = QComboBox()
-        self._target_metric.addItems(TARGET_METRICS)
-        self._target_metric.setCurrentText(DEFAULT_TARGET_METRIC)
-        train_lay.addRow("Target metric:", self._target_metric)
-
-        self._recall_targets = QLineEdit("0.95, 0.99")
-        self._recall_targets.setPlaceholderText("e.g. 0.90, 0.95, 0.99 — leave blank to disable")
-        self._recall_targets.setToolTip(
-            "Comma-separated target recall values in (0, 1]. For each value, the validation "
-            "epoch logs a per-class probability threshold (one-vs-rest) achieving that recall, "
-            "plus the resulting precision. Logged to TensorBoard under val/threshold@rX.XX/<class>."
-        )
-        train_lay.addRow("Recall targets:", self._recall_targets)
-
+        # ── Hardware ──────────────────────────────────────────────────────
         self._device = QComboBox()
         self._device.addItem("CPU", "cpu")
         if torch.cuda.is_available():
@@ -231,16 +180,87 @@ class SettingsPanel(QWidget):
         idx = self._device.findData(device_default)
         if idx >= 0:
             self._device.setCurrentIndex(idx)
-        train_lay.addRow("Device:", self._device)
+        hw_lay.addRow("Device:", self._device)
         # auto-toggle pin_memory when device changes
         self._device.currentIndexChanged.connect(self._on_device_changed)
 
-        form.addRow(train_box)
+        self._num_workers = QSpinBox()
+        self._num_workers.setRange(0, 32)
+        self._num_workers.setValue(0)
+        self._num_workers.setToolTip(
+            "Number of DataLoader worker processes.\n"
+            "On Windows + CUDA, set to 0: each worker re-imports torch and "
+            "commits ~1 GB of virtual memory for the CUDA DLLs, which often "
+            "exceeds the default Windows page-file size (WinError 1455)."
+        )
+        hw_lay.addRow("DataLoader workers:", self._num_workers)
 
-        # ── Resume ───────────────────────────────────────────────────────
-        resume_box = QGroupBox("Resume from checkpoint (optional)")
-        resume_lay = QFormLayout(resume_box)
+        self._pin_memory = QCheckBox("Pin memory (faster CPU→GPU transfer)")
+        self._pin_memory.setChecked(torch.cuda.is_available())
+        self._pin_memory.setToolTip(
+            "Enables pinned (page-locked) memory in the DataLoader.\n"
+            "Only beneficial when training on a CUDA GPU."
+        )
+        hw_lay.addRow("", self._pin_memory)
 
+        self._use_amp = QCheckBox("Mixed precision (fp16 autocast)")
+        self._use_amp.setChecked(torch.cuda.is_available())
+        self._use_amp.setToolTip(
+            "Use automatic mixed precision (torch.cuda.amp) during training and validation.\n"
+            "Typically 1.5–3× faster and ~40% less GPU memory on Tensor Core GPUs\n"
+            "(Volta/Turing/Ampere/Ada). Silently disabled on CPU."
+        )
+        hw_lay.addRow("", self._use_amp)
+
+        # ── Output ────────────────────────────────────────────────────────
+        self._keep_last = QSpinBox()
+        self._keep_last.setRange(1, 100)
+        self._keep_last.setValue(3)
+        self._keep_last.setToolTip("Number of recent epoch checkpoints to keep on disk (best.pt is always kept)")
+        out_lay.addRow("Keep last N checkpoints:", self._keep_last)
+
+        self._target_metric = QComboBox()
+        self._target_metric.addItems(TARGET_METRICS)
+        self._target_metric.setCurrentText(DEFAULT_TARGET_METRIC)
+        self._target_metric.setToolTip(
+            "Metric used to decide which epoch becomes best.pt."
+        )
+        out_lay.addRow("Target metric:", self._target_metric)
+
+        self._recall_targets = QLineEdit("0.95, 0.99")
+        self._recall_targets.setPlaceholderText("e.g. 0.90, 0.95, 0.99 — leave blank to disable")
+        self._recall_targets.setToolTip(
+            "Comma-separated target recall values in (0, 1]. For each value, the validation "
+            "epoch logs a per-class probability threshold (one-vs-rest) achieving that recall, "
+            "plus the resulting precision. Logged to TensorBoard under val/threshold@rX.XX/<class>."
+        )
+        out_lay.addRow("Recall targets:", self._recall_targets)
+
+        self._checkpoint_dir = QLineEdit("checkpoints")
+        btn_ck = QPushButton("Browse…")
+        btn_ck.clicked.connect(lambda: self._browse_dir(self._checkpoint_dir))
+        ck_row = QHBoxLayout()
+        ck_row.addWidget(self._checkpoint_dir)
+        ck_row.addWidget(btn_ck)
+        out_lay.addRow("Checkpoint dir:", ck_row)
+
+        self._log_dir = QLineEdit("runs")
+        btn_log = QPushButton("Browse…")
+        btn_log.clicked.connect(lambda: self._browse_dir(self._log_dir))
+        log_row = QHBoxLayout()
+        log_row.addWidget(self._log_dir)
+        log_row.addWidget(btn_log)
+        out_lay.addRow("Log dir:", log_row)
+
+        self._experiment_name = QLineEdit("experiment")
+        out_lay.addRow("Experiment name:", self._experiment_name)
+
+        self._tb_port = QSpinBox()
+        self._tb_port.setRange(1024, 65535)
+        self._tb_port.setValue(6006)
+        out_lay.addRow("TensorBoard port:", self._tb_port)
+
+        # ── Resume (on the Model page — it selects what to start from) ────
         self._resume_edit = QLineEdit()
         self._resume_edit.setPlaceholderText("Leave blank to start fresh")
         btn_browse_resume = QPushButton("Browse…")
@@ -253,41 +273,10 @@ class SettingsPanel(QWidget):
         resume_row.addWidget(self._resume_edit)
         resume_row.addWidget(btn_browse_resume)
         resume_row.addWidget(btn_clear_resume)
-        resume_lay.addRow("Checkpoint file:", resume_row)
-
-        form.addRow(resume_box)
-
-        # ── Directories ───────────────────────────────────────────────────
-        dir_box = QGroupBox("Directories & Logging")
-        dir_lay = QFormLayout(dir_box)
-
-        self._checkpoint_dir = QLineEdit("checkpoints")
-        btn_ck = QPushButton("Browse…")
-        btn_ck.clicked.connect(lambda: self._browse_dir(self._checkpoint_dir))
-        ck_row = QHBoxLayout()
-        ck_row.addWidget(self._checkpoint_dir)
-        ck_row.addWidget(btn_ck)
-        dir_lay.addRow("Checkpoint dir:", ck_row)
-
-        self._log_dir = QLineEdit("runs")
-        btn_log = QPushButton("Browse…")
-        btn_log.clicked.connect(lambda: self._browse_dir(self._log_dir))
-        log_row = QHBoxLayout()
-        log_row.addWidget(self._log_dir)
-        log_row.addWidget(btn_log)
-        dir_lay.addRow("Log dir:", log_row)
-
-        self._experiment_name = QLineEdit("experiment")
-        dir_lay.addRow("Experiment name:", self._experiment_name)
-
-        self._tb_port = QSpinBox()
-        self._tb_port.setRange(1024, 65535)
-        self._tb_port.setValue(6006)
-        dir_lay.addRow("TensorBoard port:", self._tb_port)
-
-        form.addRow(dir_box)
+        model_lay.addRow("Resume from:", resume_row)
 
         # ── Persist buttons ───────────────────────────────────────────────
+        # Outside the tabs so they stay reachable from any page.
         btn_row = QHBoxLayout()
         btn_save = QPushButton("Save settings")
         btn_save.clicked.connect(self.save_settings)
@@ -295,7 +284,9 @@ class SettingsPanel(QWidget):
         btn_load.clicked.connect(self._browse_and_load)
         btn_row.addWidget(btn_save)
         btn_row.addWidget(btn_load)
-        form.addRow(btn_row)
+        outer.addLayout(btn_row)
+
+        fit_tabs(self._tabs)
 
         # ── Load persisted settings ───────────────────────────────────────
         self._load_from_file(_SETTINGS_FILE)

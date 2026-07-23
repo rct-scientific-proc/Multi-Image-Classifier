@@ -9,29 +9,16 @@ Layout:
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QMainWindow, QDockWidget, QWidget, QScrollArea, QStatusBar, QTabWidget,
+    QMainWindow, QDockWidget, QStatusBar, QTabWidget,
 )
 
+from app.panels.common            import fit_tabs, scrollable
 from app.panels.settings_panel    import SettingsPanel
 from app.panels.control_panel     import ControlPanel
 from app.panels.inference_panel   import InferencePanel
 from app.panels.console_panel     import ConsolePanel
 from app.panels.checkpoint_panel  import CheckpointPanel
 from app.panels.tensorboard_panel import TensorBoardPanel
-
-
-def _scrollable(widget: QWidget) -> QScrollArea:
-    """Wrap *widget* in a vertical-only scroll area.
-
-    Applied per tab page so any one page can grow past the dock height without
-    clipping — the headroom that makes it safe to keep adding options.
-    """
-    area = QScrollArea()
-    area.setWidgetResizable(True)
-    area.setFrameShape(QScrollArea.NoFrame)
-    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    area.setWidget(widget)
-    return area
 
 
 class MainWindow(QMainWindow):
@@ -68,10 +55,10 @@ class MainWindow(QMainWindow):
         self.tensorboard_panel = TensorBoardPanel()
 
         right_tabs = QTabWidget()
-        right_tabs.addTab(_scrollable(self.control_panel),     "Train")
-        right_tabs.addTab(_scrollable(self.inference_panel),   "Inference")
-        right_tabs.addTab(_scrollable(self.checkpoint_panel),  "Checkpoints")
-        right_tabs.addTab(_scrollable(self.tensorboard_panel), "TensorBoard")
+        right_tabs.addTab(scrollable(self.control_panel),     "Train")
+        right_tabs.addTab(scrollable(self.inference_panel),   "Inference")
+        right_tabs.addTab(scrollable(self.checkpoint_panel),  "Checkpoints")
+        right_tabs.addTab(scrollable(self.tensorboard_panel), "TensorBoard")
         self.right_tabs = right_tabs
 
         right_dock = QDockWidget("Controls", self)
@@ -81,6 +68,9 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
         )
         # Stop either dock being dragged narrow enough to elide its button text.
+        # fit_tabs() has already pinned the tab widgets' own minimums, so these
+        # floors are the binding constraint rather than the tab labels.
+        fit_tabs(right_tabs)
         left_dock.setMinimumWidth(300)
         right_dock.setMinimumWidth(320)
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
