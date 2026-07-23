@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from src.augment import GpuAugment, Normalizer
 from src.metrics import MetricTracker, DEFAULT_TARGET_METRIC
 from src.checkpoints import save_checkpoint
 from src.logger import ExperimentLogger
@@ -83,6 +84,9 @@ class Trainer:
         criterion: nn.Module | None = None,
         recall_targets: list[float] | None = None,
         use_amp: bool = False,
+        augment: "GpuAugment | None" = None,
+        normalizer: "Normalizer | None" = None,
+        seed: int | None = None,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -103,10 +107,39 @@ class Trainer:
         # AMP is only meaningful on CUDA; silently disable elsewhere
         self.use_amp       = bool(use_amp) and str(device).startswith("cuda")
         self._scaler       = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.seed          = seed
+        # Augmentation is train-only; normalisation applies to both loops and
+        # must match at inference, so its stats go into the checkpoint (see fit).
+        self.augment    = augment.to(device) if augment is not None else None
+        self.normalizer = normalizer.to(device) if normalizer is not None else None
+
+    # ------------------------------------------------------------------
+    def _prepare_batch(self, images: torch.Tensor, training: bool) -> torch.Tensor:
+        """uint8 -> float [0,1] -> augment (train only) -> normalise.
+
+        Called from both loops with ``training`` set accordingly, so the one
+        asymmetry that matters — augmentation on train but never on validation,
+        normalisation on both — lives in a single place rather than being
+        duplicated and drifting.
+
+        Deliberately runs before the autocast block: geometric resampling and
+        colour maths in fp16 lose precision, and at these tensor sizes there is
+        no speed to gain from doing them in half.
+        """
+        if images.dtype == torch.uint8:
+            images = images.float().mul_(1.0 / 255.0)
+
+        if training and self.augment is not None:
+            images = self.augment(images)
+        if self.normalizer is not None:
+            images = self.normalizer(images)
+        return images
 
     # ------------------------------------------------------------------
     def train_one_epoch(self, epoch: int) -> dict:
         self.model.train()
+        if self.augment is not None:
+            self.augment.train()          # matches the module's own eval guard
         tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
 
         for batch_idx, (images, labels, _gt) in enumerate(self.train_loader):
@@ -115,8 +148,7 @@ class Trainer:
 
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
-            if images.dtype == torch.uint8:
-                images = images.float().mul_(1.0 / 255.0)
+            images = self._prepare_batch(images, training=True)
 
             self.optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=self.use_amp):
@@ -143,13 +175,15 @@ class Trainer:
     @torch.no_grad()
     def validate(self, epoch: int) -> dict:
         self.model.eval()
+        if self.augment is not None:
+            self.augment.eval()           # belt and braces; not called below
         tracker = MetricTracker(self._num_classes, recall_targets=self.recall_targets)
 
         for images, labels, _gt in self.val_loader:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
-            if images.dtype == torch.uint8:
-                images = images.float().mul_(1.0 / 255.0)
+            # training=False: normalise, never augment
+            images = self._prepare_batch(images, training=False)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 logits = self.model(images)
@@ -178,6 +212,22 @@ class Trainer:
             epoch, train_loss, train_accuracy, val_loss, val_accuracy, lr
         Saves a checkpoint after every epoch.
         """
+        if self.seed is not None:
+            # Makes the augmentation draw sequence repeatable. Note this seeds
+            # from here, so it does not cover model init or the DataLoader
+            # shuffle that happened before the Trainer was constructed.
+            torch.manual_seed(self.seed)
+
+        # Record what the weights were actually trained under. Copied rather
+        # than mutated: the caller's settings dict is reused elsewhere, and the
+        # normalisation stats may be derived (mode="dataset") rather than typed
+        # in, so re-deriving them at inference is not possible.
+        hyperparams = dict(hyperparams)
+        if self.normalizer is not None:
+            hyperparams.update(self.normalizer.state())
+        if self.augment is not None:
+            hyperparams.update(self.augment.config)
+
         for epoch in range(start_epoch, epochs):
             if self.cancel_event.is_set():
                 break

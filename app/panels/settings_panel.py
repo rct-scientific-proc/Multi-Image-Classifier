@@ -9,7 +9,7 @@ import json
 import os
 
 import torch
-from PyQt5.QtCore import QStandardPaths
+from PyQt5.QtCore import QStandardPaths, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -17,7 +17,9 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -27,8 +29,48 @@ from PyQt5.QtWidgets import (
 
 from app.panels.common import fit_tabs, scrollable
 from app.theme import DEFAULT_THEME
+from src.augment import (
+    AUGMENT_DEFAULTS, AUGMENT_PRESETS, DEFAULT_NORMALIZE, NORMALIZE_MODES,
+)
 from src.metrics import DEFAULT_TARGET_METRIC, TARGET_METRICS
 from src.model import AVAILABLE_BACKBONES
+
+# Preset name shown once any individual control is touched.
+_CUSTOM_PRESET = "custom"
+
+class _StatsWorker(QThread):
+    """Measures per-channel mean/std off the GUI thread.
+
+    Streaming a large train split takes long enough to freeze the window if
+    done inline, and this is a button a user presses expecting a result.
+    """
+
+    sig_done = pyqtSignal(list, list)
+    sig_error = pyqtSignal(str)
+
+    def __init__(self, h5_path: str, in_channels: int, parent=None):
+        super().__init__(parent)
+        self._h5 = h5_path
+        self._c = in_channels
+
+    def run(self) -> None:
+        try:
+            # Imported here, not at module scope: pulling torch/h5py in during
+            # panel construction would slow app start for a button that is
+            # rarely pressed.
+            from src.augment import compute_dataset_stats
+            from src.dataset import H5Dataset, make_dataloader, SPLIT_TRAIN
+
+            ds = H5Dataset(self._h5, split=SPLIT_TRAIN)
+            if len(ds) == 0:
+                raise ValueError("Train split contains 0 samples.")
+            loader = make_dataloader(ds, batch_size=256, shuffle=False,
+                                     num_workers=0, pin_memory=False)
+            mean, std = compute_dataset_stats(loader, device="cpu")
+            self.sig_done.emit(list(mean), list(std))
+        except Exception as exc:                       # surfaced in a dialog
+            self.sig_error.emit(f"{type(exc).__name__}: {exc}")
+
 
 _SETTINGS_FILE = os.path.join(
     QStandardPaths.writableLocation(QStandardPaths.AppDataLocation),
@@ -62,6 +104,14 @@ _DEFAULTS: dict = {
     "keep_last":        3,
     "recall_targets":   "0.95, 0.99",
     "theme":            DEFAULT_THEME,
+    "seed":             0,
+    # Preprocessing — applies to train, validation and inference alike.
+    "normalize":        DEFAULT_NORMALIZE,
+    "normalize_mean":   [],
+    "normalize_std":    [],
+    "aug_preset":       "none",
+    # Train-only augmentation; 16 flat scalars, see src/augment.py
+    **AUGMENT_DEFAULTS,
 }
 
 
@@ -92,8 +142,15 @@ class SettingsPanel(QWidget):
         ds_lay    = _page("Data")
         model_lay = _page("Model")
         train_lay = _page("Optimizer")
+        aug_lay   = _page("Augment")
         hw_lay    = _page("Hardware")
         out_lay   = _page("Output")
+
+        # Guards the preset <-> widget feedback loop: setting widgets from a
+        # preset must not itself flip the preset back to "custom".
+        self._loading = False
+        self._normalize_mean: list[float] = []
+        self._normalize_std: list[float] = []
 
         # ── Data ──────────────────────────────────────────────────────────
         self._h5_edit = QLineEdit()
@@ -118,6 +175,123 @@ class SettingsPanel(QWidget):
             "1 = every epoch (default), N = every N epochs, 0 = never shuffle."
         )
         ds_lay.addRow("Shuffle every N epochs:", self._shuffle_every)
+
+        # ── Normalisation (Data, not Augment: this is preprocessing and runs
+        #    on train, validation and inference alike) ──────────────────────
+        self._normalize = QComboBox()
+        self._normalize.addItems(NORMALIZE_MODES)
+        self._normalize.setCurrentText(DEFAULT_NORMALIZE)
+        self._normalize.setToolTip(
+            "Per-channel (x - mean) / std, applied to every split.\n"
+            "  none     — raw [0, 1]\n"
+            "  imagenet — ImageNet statistics, for pretrained backbones\n"
+            "  dataset  — measured from your train split (use the button below)\n"
+            "  custom   — whatever mean/std are currently stored\n"
+            "The values used are written into the checkpoint so inference "
+            "reproduces them exactly."
+        )
+        self._normalize.currentTextChanged.connect(self._on_normalize_changed)
+        ds_lay.addRow("Normalisation:", self._normalize)
+
+        self._norm_label = QLabel("—")
+        self._norm_label.setWordWrap(True)
+        ds_lay.addRow("Current stats:", self._norm_label)
+
+        self._btn_stats = QPushButton("Compute from dataset")
+        self._btn_stats.setToolTip(
+            "Stream the train split and measure per-channel mean/std. "
+            "Sets the mode to 'dataset'."
+        )
+        self._btn_stats.clicked.connect(self._on_compute_stats)
+        ds_lay.addRow("", self._btn_stats)
+
+        # ── Augment (train only) ──────────────────────────────────────────
+        self._aug_enabled = QCheckBox("Enable augmentation (training batches only)")
+        self._aug_enabled.setToolTip(
+            "Augmentation is applied on the GPU to whole batches, with "
+            "independent random parameters per image.\n"
+            "Never applied to validation or inference."
+        )
+        aug_lay.addRow("", self._aug_enabled)
+
+        self._aug_preset = QComboBox()
+        self._aug_preset.addItems(list(AUGMENT_PRESETS) + [_CUSTOM_PRESET])
+        self._aug_preset.setToolTip(
+            "Starting points. 'standard' is the usual CIFAR recipe "
+            "(pad-and-crop + horizontal flip + mild jitter).\n"
+            "Changing any control below switches this to 'custom'."
+        )
+        self._aug_preset.activated.connect(self._on_preset_chosen)
+        aug_lay.addRow("Preset:", self._aug_preset)
+
+        def _prob(tip: str, maximum: float = 1.0, step: float = 0.05,
+                  decimals: int = 2) -> QDoubleSpinBox:
+            sb = QDoubleSpinBox()
+            sb.setDecimals(decimals)
+            sb.setRange(0.0, maximum)
+            sb.setSingleStep(step)
+            sb.setToolTip(tip)
+            sb.valueChanged.connect(self._on_aug_widget_changed)
+            return sb
+
+        self._aug_hflip_p = _prob("Probability of a horizontal flip, per image.")
+        aug_lay.addRow("Horizontal flip p:", self._aug_hflip_p)
+
+        self._aug_vflip_p = _prob(
+            "Probability of a vertical flip. Usually wrong for natural images — "
+            "an upside-down cat is not a cat.")
+        aug_lay.addRow("Vertical flip p:", self._aug_vflip_p)
+
+        self._aug_crop_padding = QSpinBox()
+        self._aug_crop_padding.setRange(0, 64)
+        self._aug_crop_padding.setToolTip(
+            "Zero-pad by N pixels then take a random crop back to the original "
+            "size. 4 is the standard choice for 32x32. 0 disables.")
+        self._aug_crop_padding.valueChanged.connect(self._on_aug_widget_changed)
+        aug_lay.addRow("Crop padding (px):", self._aug_crop_padding)
+
+        self._aug_rotate_deg = _prob("Max rotation in degrees, +/-.", 180.0, 1.0, 1)
+        aug_lay.addRow("Rotation (deg):", self._aug_rotate_deg)
+
+        self._aug_translate = _prob("Max shift as a fraction of image size, +/-.", 0.5)
+        aug_lay.addRow("Translate:", self._aug_translate)
+
+        self._aug_scale_jitter = _prob("Max scale change, +/- this fraction.", 0.9)
+        aug_lay.addRow("Scale jitter:", self._aug_scale_jitter)
+
+        self._aug_shear_deg = _prob("Max shear in degrees, +/-.", 45.0, 1.0, 1)
+        aug_lay.addRow("Shear (deg):", self._aug_shear_deg)
+
+        self._aug_brightness = _prob("Max brightness change, +/- this fraction.")
+        aug_lay.addRow("Brightness:", self._aug_brightness)
+
+        self._aug_contrast = _prob("Max contrast change, +/- this fraction.")
+        aug_lay.addRow("Contrast:", self._aug_contrast)
+
+        self._aug_saturation = _prob(
+            "Max saturation change, +/-. Ignored when input channels = 1.")
+        aug_lay.addRow("Saturation:", self._aug_saturation)
+
+        self._aug_hue = _prob(
+            "Max hue rotation as a fraction of the colour wheel, +/-. "
+            "Ignored when input channels = 1.", 0.5, 0.01)
+        aug_lay.addRow("Hue:", self._aug_hue)
+
+        self._aug_erase_p = _prob("Probability of blanking a random box, per image.")
+        aug_lay.addRow("Random erase p:", self._aug_erase_p)
+
+        self._aug_erase_min = _prob("Smallest erased box, as a fraction of area.",
+                                    1.0, 0.01)
+        aug_lay.addRow("Erase min area:", self._aug_erase_min)
+
+        self._aug_erase_max = _prob("Largest erased box, as a fraction of area.",
+                                    1.0, 0.01)
+        aug_lay.addRow("Erase max area:", self._aug_erase_max)
+
+        self._aug_erase_value = _prob("Fill value for the erased box, in [0, 1].")
+        aug_lay.addRow("Erase fill:", self._aug_erase_value)
+
+        self._aug_enabled.toggled.connect(self._on_aug_enabled_toggled)
 
         # ── Model ─────────────────────────────────────────────────────────
         self._backbone = QComboBox()
@@ -174,6 +348,16 @@ class SettingsPanel(QWidget):
         self._epochs.setRange(1, 9999)
         self._epochs.setValue(10)
         train_lay.addRow("Epochs:", self._epochs)
+
+        self._seed = QSpinBox()
+        self._seed.setRange(0, 2_147_483_647)
+        self._seed.setValue(0)
+        self._seed.setToolTip(
+            "Seeds the augmentation draw sequence at the start of fit().\n"
+            "Does not cover model initialisation or the DataLoader shuffle, "
+            "which happen before the Trainer is built."
+        )
+        train_lay.addRow("Random seed:", self._seed)
 
         # ── Hardware ──────────────────────────────────────────────────────
         self._device = QComboBox()
@@ -301,6 +485,100 @@ class SettingsPanel(QWidget):
 
     # ── Private helpers ───────────────────────────────────────────────────
 
+    # ── Augmentation / normalisation handlers ─────────────────────────────
+
+    _AUG_WIDGETS = {
+        "aug_hflip_p": "_aug_hflip_p", "aug_vflip_p": "_aug_vflip_p",
+        "aug_crop_padding": "_aug_crop_padding", "aug_rotate_deg": "_aug_rotate_deg",
+        "aug_translate": "_aug_translate", "aug_scale_jitter": "_aug_scale_jitter",
+        "aug_shear_deg": "_aug_shear_deg", "aug_brightness": "_aug_brightness",
+        "aug_contrast": "_aug_contrast", "aug_saturation": "_aug_saturation",
+        "aug_hue": "_aug_hue", "aug_erase_p": "_aug_erase_p",
+        "aug_erase_min": "_aug_erase_min", "aug_erase_max": "_aug_erase_max",
+        "aug_erase_value": "_aug_erase_value",
+    }
+
+    def _set_aug_widgets(self, cfg: dict) -> None:
+        """Push a config into the widgets without tripping the custom guard."""
+        prev, self._loading = self._loading, True
+        try:
+            for key, attr in self._AUG_WIDGETS.items():
+                getattr(self, attr).setValue(
+                    type(getattr(self, attr).value())(cfg.get(key, AUGMENT_DEFAULTS[key]))
+                )
+            self._aug_enabled.setChecked(bool(cfg.get("aug_enabled", False)))
+            # Inside the guard: this re-syncs the enabled/disabled state, but it
+            # also routes through _on_aug_widget_changed, which would otherwise
+            # flag the freshly-applied preset as "custom".
+            self._on_aug_enabled_toggled(self._aug_enabled.isChecked())
+        finally:
+            self._loading = prev
+
+    def _on_preset_chosen(self, _index: int) -> None:
+        name = self._aug_preset.currentText()
+        if name == _CUSTOM_PRESET:
+            return
+        self._set_aug_widgets(AUGMENT_PRESETS[name])
+
+    def _on_aug_widget_changed(self, *_args) -> None:
+        """Any manual edit means the config no longer matches a named preset."""
+        if self._loading:
+            return
+        if self._aug_preset.currentText() != _CUSTOM_PRESET:
+            self._aug_preset.setCurrentText(_CUSTOM_PRESET)
+
+    def _on_aug_enabled_toggled(self, on: bool) -> None:
+        for attr in self._AUG_WIDGETS.values():
+            getattr(self, attr).setEnabled(on)
+        self._aug_preset.setEnabled(on)
+        if not self._loading:
+            self._on_aug_widget_changed()
+
+    def _refresh_norm_label(self) -> None:
+        mode = self._normalize.currentText()
+        if mode == "none":
+            self._norm_label.setText("none — raw [0, 1]")
+        elif mode == "imagenet":
+            self._norm_label.setText("ImageNet statistics")
+        elif self._normalize_mean and self._normalize_std:
+            self._norm_label.setText(
+                f"mean {[round(v, 4) for v in self._normalize_mean]}\n"
+                f"std  {[round(v, 4) for v in self._normalize_std]}"
+            )
+        else:
+            self._norm_label.setText("not set — will fall back to raw [0, 1]")
+
+    def _on_normalize_changed(self, _mode: str) -> None:
+        self._refresh_norm_label()
+
+    def _on_compute_stats(self) -> None:
+        h5 = self._h5_edit.text().strip()
+        if not h5 or not os.path.isfile(h5):
+            QMessageBox.warning(self, "Compute statistics",
+                                f"H5 dataset not found:\n{h5}")
+            return
+        self._btn_stats.setEnabled(False)
+        self._btn_stats.setText("Computing…")
+        self._stats_worker = _StatsWorker(h5, self._in_channels.value())
+        self._stats_worker.sig_done.connect(self._on_stats_done)
+        self._stats_worker.sig_error.connect(self._on_stats_error)
+        self._stats_worker.start()
+
+    def _on_stats_done(self, mean: list, std: list) -> None:
+        self._normalize_mean = list(mean)
+        self._normalize_std = list(std)
+        self._normalize.setCurrentText("dataset")
+        self._refresh_norm_label()
+        self._btn_stats.setEnabled(True)
+        self._btn_stats.setText("Compute from dataset")
+
+    def _on_stats_error(self, msg: str) -> None:
+        self._btn_stats.setEnabled(True)
+        self._btn_stats.setText("Compute from dataset")
+        QMessageBox.critical(self, "Compute statistics", msg)
+
+    # ── Other handlers ────────────────────────────────────────────────────
+
     def _on_backbone_changed(self, name: str) -> None:
         self._pretrained.setEnabled(name != "simple_cnn")
 
@@ -391,6 +669,24 @@ class SettingsPanel(QWidget):
         self._log_dir.setText(s.get("log_dir", "runs"))
         self._experiment_name.setText(s.get("experiment_name", "experiment"))
         self._tb_port.setValue(int(s.get("tensorboard_port", 6006)))
+        self._seed.setValue(int(s.get("seed", 0)))
+
+        # Normalisation + augmentation. _set_aug_widgets holds the guard so a
+        # restored config is not misread as a manual edit.
+        self._normalize_mean = list(s.get("normalize_mean") or [])
+        self._normalize_std = list(s.get("normalize_std") or [])
+        idx = self._normalize.findText(s.get("normalize", DEFAULT_NORMALIZE))
+        self._normalize.setCurrentIndex(max(0, idx))
+        self._refresh_norm_label()
+
+        self._set_aug_widgets(s)
+        preset = s.get("aug_preset", "none")
+        idx = self._aug_preset.findText(preset)
+        prev, self._loading = self._loading, True
+        try:
+            self._aug_preset.setCurrentIndex(max(0, idx))
+        finally:
+            self._loading = prev
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -421,6 +717,14 @@ class SettingsPanel(QWidget):
             "log_dir":          self._log_dir.text().strip(),
             "experiment_name":  self._experiment_name.text().strip(),
             "tensorboard_port": self._tb_port.value(),
+            "seed":             self._seed.value(),
+            "normalize":        self._normalize.currentText(),
+            "normalize_mean":   list(self._normalize_mean),
+            "normalize_std":    list(self._normalize_std),
+            "aug_preset":       self._aug_preset.currentText(),
+            "aug_enabled":      self._aug_enabled.isChecked(),
+            **{key: getattr(self, attr).value()
+               for key, attr in self._AUG_WIDGETS.items()},
         }
 
     @property

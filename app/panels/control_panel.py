@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.augment import GpuAugment, Normalizer
 from src.dataset import (
     H5Dataset, make_dataloader, peek_h5_meta,
     SPLIT_TRAIN, SPLIT_VALIDATE,
@@ -111,6 +112,20 @@ class TrainingWorker(QThread):
             optimizer = _build_optimizer(model, s)
             scheduler = _build_scheduler(optimizer, s)
 
+            # Both read from the settings dict and fall back to no-ops, so this
+            # is inert until the Augmentation controls land. Normalisation
+            # applies to train and validation alike; augmentation to train only.
+            augment = GpuAugment(s, in_channels=s["in_channels"])
+            normalizer = Normalizer.from_config(s, in_channels=s["in_channels"])
+            if augment.enabled:
+                self.sig_log.emit(f"Augmentation: {', '.join(augment.active_ops)}")
+            if not normalizer.is_identity:
+                st = normalizer.state()
+                self.sig_log.emit(
+                    f"Normalisation: mean={st['normalize_mean']} "
+                    f"std={st['normalize_std']}"
+                )
+
             os.makedirs(s["checkpoint_dir"], exist_ok=True)
             os.makedirs(s["log_dir"], exist_ok=True)
 
@@ -151,6 +166,9 @@ class TrainingWorker(QThread):
                 criterion=_build_criterion(s),
                 recall_targets=_parse_recall_targets(s.get("recall_targets", "")),
                 use_amp=bool(s.get("use_amp", False)),
+                augment=augment,
+                normalizer=normalizer,
+                seed=s.get("seed"),
             )
 
             self.sig_log.emit(

@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.augment import Normalizer
 from src.dataset import H5Dataset, make_dataloader, SPLIT_TEST
 from src.metrics import MetricTracker
 from src.model import build_model
@@ -111,6 +112,20 @@ class InferenceWorker(QThread):
             model.load_state_dict(ckpt["model_state_dict"])
             model.to(self._device).eval()
 
+            # Replay the exact normalisation these weights were trained under.
+            # Getting this wrong does not raise — it silently shifts every
+            # metric — so it is read from the checkpoint rather than from the
+            # current settings, which may since have changed.
+            normalizer = Normalizer.from_checkpoint(hp, in_channels).to(self._device)
+            if normalizer.is_identity:
+                self.sig_log.emit("  Normalisation: none (raw [0,1])")
+            else:
+                st = normalizer.state()
+                self.sig_log.emit(
+                    f"  Normalisation from checkpoint: "
+                    f"mean={st['normalize_mean']} std={st['normalize_std']}"
+                )
+
             criterion = torch.nn.CrossEntropyLoss()
             tracker   = MetricTracker(num_classes)
             total     = len(test_loader)
@@ -129,6 +144,7 @@ class InferenceWorker(QThread):
                     labels = labels.to(self._device, non_blocking=True)
                     if images.dtype == torch.uint8:
                         images = images.float().mul_(1.0 / 255.0)
+                    images = normalizer(images)   # never augment at inference
 
                     with torch.amp.autocast("cuda", enabled=self._use_amp):
                         logits = model(images)

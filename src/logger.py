@@ -157,10 +157,17 @@ class ExperimentLogger:
         Only scalar (int/float/str/bool) hparam values are included — TensorBoard
         does not accept nested dicts or lists.
         """
-        flat_hparams = {
-            k: v for k, v in hyperparams.items()
-            if isinstance(v, (int, float, str, bool))
-        }
+        flat_hparams: dict = {}
+        for k, v in hyperparams.items():
+            if isinstance(v, (int, float, str, bool)):
+                flat_hparams[k] = v
+            elif (isinstance(v, (list, tuple)) and v
+                  and all(isinstance(x, (int, float)) for x in v)):
+                # add_hparams rejects sequences outright. Rendering them keeps
+                # short numeric ones visible instead of silently vanishing —
+                # normalize_mean / normalize_std arrive in exactly this shape,
+                # and losing them would make a run unreproducible from its logs.
+                flat_hparams[k] = "[" + ", ".join(f"{float(x):.4g}" for x in v) + "]"
         flat_metrics = {
             f"hparam/{k}": v
             for k, v in best_metrics.items()

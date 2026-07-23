@@ -20,6 +20,7 @@ from app.panels.control_panel     import ControlPanel
 from app.panels.inference_panel   import InferencePanel
 from app.panels.console_panel     import ConsolePanel
 from app.panels.metrics_panel     import MetricsPanel
+from app.panels.preview_panel     import PreviewPanel
 from app.panels.checkpoint_panel  import CheckpointPanel
 from app.panels.tensorboard_panel import TensorBoardPanel
 
@@ -34,20 +35,25 @@ class MainWindow(QMainWindow):
         # still fits a 1080p screen once the taskbar is accounted for.
         self.resize(1200, 820)
 
-        # ---- Central widget: log + live charts ----
+        # ---- Settings first: the centre and right panels are constructed with
+        #      a reference to it, so it has to exist before either. ----
+        self.settings_panel = SettingsPanel()
+
+        # ---- Central widget: log + live charts + augmentation preview ----
         # The largest area was showing the least dense content. The log stays,
         # but the curves now live here too instead of only in TensorBoard.
         self.console_panel = ConsolePanel()
         self.metrics_panel = MetricsPanel()
+        self.preview_panel = PreviewPanel(self.settings_panel)
         centre = QTabWidget()
         centre.addTab(self.console_panel, "Log")
         centre.addTab(self.metrics_panel, "Metrics")
+        centre.addTab(self.preview_panel, "Augment preview")
         fit_tabs(centre, min_width=160)
         self.centre_tabs = centre
         self.setCentralWidget(centre)
 
         # ---- Left dock: settings ----
-        self.settings_panel = SettingsPanel()
         left_dock = QDockWidget("Settings", self)
         left_dock.setWidget(self.settings_panel)
         left_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
@@ -100,6 +106,7 @@ class MainWindow(QMainWindow):
         # ---- Wire control panel signals to console ----
         self.control_panel.sig_log_message.connect(self.console_panel.append_message)
         self.inference_panel.sig_log_message.connect(self.console_panel.append_message)
+        self.preview_panel.sig_log_message.connect(self.console_panel.append_message)
         self.control_panel.sig_epoch_complete.connect(self._on_epoch_complete)
         self.control_panel.sig_epoch_complete.connect(self.metrics_panel.add_epoch)
         self.control_panel.sig_training_finished.connect(self._on_training_finished)

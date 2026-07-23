@@ -108,6 +108,29 @@ is involved, so you can validate the core logic independently.
 
 ---
 
+## Phase 13 — GPU data augmentation
+
+- [x] Spike: torchvision v2 randomises PER BATCH on batched input (one draw for
+      every image) — unusable here. kornia is per-sample but raises on
+      `.to(device)`. Hand-rolled batched ops are per-sample and ~35x cheaper
+      than looping v2 per image. See `test/bench_augment.py`. No new dependency.
+- [x] `src/augment.py` — `GpuAugment` (train only) + `Normalizer` (everywhere),
+      9 per-sample ops, 16 flat scalar config keys, 4 presets
+- [x] `compute_dataset_stats()` — streamed mean/std, agrees with the published
+      CIFAR-100 values to ~3 decimal places
+- [x] Trainer: `_prepare_batch(images, training)` holds the one asymmetry —
+      augment on train only, normalise on both. Runs outside autocast.
+- [x] Normalisation stats written into the checkpoint; `InferenceWorker` replays
+      them via `Normalizer.from_checkpoint`. Pre-existing checkpoints -> identity.
+- [x] `log_hparams` renders list-valued stats instead of silently dropping them
+- [x] Settings: Augment tab (preset + 15 controls), normalisation on the Data
+      tab, random seed on Optimizer
+- [x] `app/panels/preview_panel.py` — before/after thumbnails as a centre tab
+- [ ] MixUp / CutMix — deferred: soft targets break `MetricTracker`'s confusion
+      matrix and `FocalLoss`'s `F.nll_loss`
+
+---
+
 ## Suggested file structure
 
 ```
