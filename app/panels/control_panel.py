@@ -26,14 +26,14 @@ from PyQt5.QtWidgets import (
 
 from src.augment import GpuAugment, Normalizer
 from src.dataset import (
-    H5Dataset, make_dataloader, peek_h5_meta,
+    H5Dataset, count_labels, make_dataloader, peek_h5_meta,
     SPLIT_TRAIN, SPLIT_VALIDATE,
 )
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
 from src.metrics import parse_target_list
 from src.model import build_model
-from src.trainer import FocalLoss, Trainer
+from src.trainer import FocalLoss, Trainer, class_weights
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────
@@ -127,6 +127,22 @@ class TrainingWorker(QThread):
                     f"std={st['normalize_std']}"
                 )
 
+            # Class weights re-balance the loss without dropping any samples —
+            # counted from the train split so they match the data actually used.
+            weight = None
+            cw_mode = s.get("class_weight_mode", "none")
+            if cw_mode != "none":
+                counts = count_labels(s["h5_path"], SPLIT_TRAIN, num_classes)
+                weight = class_weights(counts, scheme=cw_mode,
+                                       beta=float(s.get("class_weight_beta", 0.999)))
+                hi = int(counts.argmax())
+                self.sig_log.emit(
+                    f"Class weights ({cw_mode}): range "
+                    f"{float(weight.min()):.3f}–{float(weight.max()):.3f}; "
+                    f"largest class '{train_ds.classes[hi]}' (n={int(counts[hi])}) "
+                    f"-> {float(weight[hi]):.3f}"
+                )
+
             os.makedirs(s["checkpoint_dir"], exist_ok=True)
             os.makedirs(s["log_dir"], exist_ok=True)
 
@@ -164,7 +180,7 @@ class TrainingWorker(QThread):
                 target_metric=s["target_metric"],
                 logger=logger,
                 keep_last=int(s.get("keep_last", 3)),
-                criterion=_build_criterion(s),
+                criterion=_build_criterion(s, weight=weight),
                 recall_targets=parse_target_list(s.get("recall_targets", "")),
                 specificity_targets=parse_target_list(
                     s.get("specificity_targets", "")),
@@ -234,6 +250,16 @@ def _build_scheduler(optimizer: torch.optim.Optimizer, s: dict):
     epochs = max(int(s.get("epochs", 10)), 1)
     if name == "CosineAnnealing":
         return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if name == "CosineWarmRestarts":
+        # Cyclic (SGDR): the LR decays over T_0 epochs, jumps back to the top,
+        # and repeats — with each cycle T_mult× longer than the last. Unlike
+        # CosineAnnealing this restarts within a run. Steps once per epoch, so
+        # it falls through the trainer's plain scheduler.step() branch.
+        t0 = max(int(s.get("restart_period", 5)), 1)
+        t_mult = max(int(s.get("restart_mult", 1)), 1)
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=t0, T_mult=t_mult
+        )
     if name == "StepLR":
         step = max(epochs // 3, 1)
         return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step, gamma=0.1)
@@ -244,12 +270,12 @@ def _build_scheduler(optimizer: torch.optim.Optimizer, s: dict):
     return None   # "None" — no scheduler
 
 
-def _build_criterion(s: dict) -> torch.nn.Module:
+def _build_criterion(s: dict, weight=None) -> torch.nn.Module:
     name = s.get("loss_fn", "CrossEntropy")
     if name == "FocalLoss":
         gamma = float(s.get("focal_gamma", 2.0))
-        return FocalLoss(gamma=gamma)
-    return torch.nn.CrossEntropyLoss()
+        return FocalLoss(gamma=gamma, alpha=weight)
+    return torch.nn.CrossEntropyLoss(weight=weight)
 
 
 

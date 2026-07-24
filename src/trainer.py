@@ -43,16 +43,21 @@ class FocalLoss(nn.Module):
     ----------
     gamma : float
         Focusing parameter. 0 = standard cross-entropy. Typical value 2.
-    alpha : float | None
-        Optional uniform class weight scalar. Pass a 1-D tensor for per-class
-        weights (same semantics as `nn.CrossEntropyLoss(weight=...)).
+    alpha : 1-D tensor | sequence | None
+        Optional per-class weight, same semantics as
+        ``nn.CrossEntropyLoss(weight=...)``. Registered as a buffer so
+        ``FocalLoss(...).to(device)`` moves it alongside the model — without
+        that, a CPU alpha against CUDA logits raises a device-mismatch error.
     """
 
     def __init__(self, gamma: float = 2.0, alpha=None, reduction: str = "mean"):
         super().__init__()
         self.gamma     = gamma
-        self.alpha     = alpha
         self.reduction = reduction
+        alpha_t = (torch.as_tensor(alpha, dtype=torch.float32)
+                   if alpha is not None else None)
+        # register_buffer accepts None; .to(device) then moves it when present.
+        self.register_buffer("alpha", alpha_t)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         log_p  = F.log_softmax(logits, dim=1)
@@ -60,10 +65,55 @@ class FocalLoss(nn.Module):
         p      = torch.exp(-ce)                      # p_t
         focal  = (1.0 - p) ** self.gamma * ce
         if self.reduction == "mean":
+            # nll_loss(reduction="mean") divides by the summed weights, not the
+            # sample count, when a weight is given; match that so the loss scale
+            # is comparable with and without alpha.
+            if self.alpha is not None:
+                w = self.alpha[targets]
+                return focal.sum() / w.sum().clamp_min(1e-8)
             return focal.mean()
         if self.reduction == "sum":
             return focal.sum()
         return focal
+
+
+def class_weights(counts, scheme: str = "effective_number",
+                  beta: float = 0.999) -> torch.Tensor:
+    """Per-class loss weights from ground-truth counts.
+
+    Re-weighting, not re-sampling: every sample is still trained on, but the
+    majority class contributes less per example. This is how the full detector
+    output (with its ~50:1 background ratio) can be trained on without dropping
+    any hard negatives while the genuine classes still get gradient.
+
+    scheme:
+        "inverse_freq"     — w_c ∝ 1 / n_c. Simple, but over-weights ultra-rare
+                             classes at extreme ratios.
+        "effective_number" — w_c ∝ (1 - β) / (1 - β^{n_c})  (Cui et al. 2019).
+                             The "effective number of samples" saturates as n_c
+                             grows, so it is gentler than raw inverse frequency
+                             at 50:1 — the recommended default.
+
+    Weights are normalised to average 1 over the classes actually present, so
+    the overall loss scale is unchanged and only the *balance* shifts. Absent
+    classes get weight 0; their index is never selected by nll_loss anyway.
+    """
+    import numpy as np
+    counts = np.asarray(counts, dtype=np.float64)
+    safe   = np.maximum(counts, 1.0)                 # guard n_c = 0 in the maths
+    if scheme == "inverse_freq":
+        raw = 1.0 / safe
+    elif scheme == "effective_number":
+        beta = min(max(float(beta), 0.0), 1.0 - 1e-9)
+        raw  = (1.0 - beta) / (1.0 - np.power(beta, safe))
+    else:
+        raise ValueError(f"unknown class-weight scheme: {scheme!r}")
+
+    present = counts > 0
+    if present.any():
+        raw = raw / raw[present].mean()
+    raw[~present] = 0.0
+    return torch.as_tensor(raw, dtype=torch.float32)
 
 
 class Trainer:
@@ -98,7 +148,11 @@ class Trainer:
         self.on_epoch_end = on_epoch_end
         self.on_batch_end = on_batch_end
         self.cancel_event  = cancel_event or threading.Event()
-        self.criterion     = criterion if criterion is not None else nn.CrossEntropyLoss()
+        # Move the criterion to the device too: a weighted loss (FocalLoss alpha
+        # or CrossEntropyLoss weight) carries a per-class tensor that must sit
+        # beside the logits, or the first backward pass raises a device mismatch.
+        criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
+        self.criterion     = criterion.to(device)
         self._num_classes  = len(train_loader.dataset.classes)
         self.target_metric = target_metric
         self.logger        = logger

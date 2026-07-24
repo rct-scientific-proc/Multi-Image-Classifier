@@ -72,6 +72,34 @@ class _StatsWorker(QThread):
             self.sig_error.emit(f"{type(exc).__name__}: {exc}")
 
 
+class _WeightPreviewWorker(QThread):
+    """Counts the train split and computes class weights off the GUI thread."""
+
+    # (labels, counts, weights) as plain lists, plus the largest-class index.
+    sig_done = pyqtSignal(list, list, list, int)
+    sig_error = pyqtSignal(str)
+
+    def __init__(self, h5_path: str, scheme: str, beta: float, parent=None):
+        super().__init__(parent)
+        self._h5 = h5_path
+        self._scheme = scheme
+        self._beta = beta
+
+    def run(self) -> None:
+        try:
+            from src.dataset import count_labels, peek_h5_meta, SPLIT_TRAIN
+            from src.trainer import class_weights
+
+            meta = peek_h5_meta(self._h5)
+            names = meta["classes"]
+            counts = count_labels(self._h5, SPLIT_TRAIN, len(names))
+            weights = class_weights(counts, scheme=self._scheme, beta=self._beta)
+            self.sig_done.emit(list(names), [int(c) for c in counts],
+                               [float(w) for w in weights], int(counts.argmax()))
+        except Exception as exc:
+            self.sig_error.emit(f"{type(exc).__name__}: {exc}")
+
+
 _SETTINGS_FILE = os.path.join(
     QStandardPaths.writableLocation(QStandardPaths.AppDataLocation),
     "image_classifier",
@@ -88,8 +116,12 @@ _DEFAULTS: dict = {
     "epochs":           10,
     "optimizer":        "Adam",
     "scheduler":        "CosineAnnealing",
+    "restart_period":   5,
+    "restart_mult":     1,
     "loss_fn":          "CrossEntropy",
     "focal_gamma":      2.0,
+    "class_weight_mode": "none",
+    "class_weight_beta": 0.999,
     "pretrained":       False,
     "target_metric":    DEFAULT_TARGET_METRIC,
     "device":           "cuda" if torch.cuda.is_available() else "cpu",
@@ -309,9 +341,41 @@ class SettingsPanel(QWidget):
         train_lay.addRow("Optimizer:", self._optimizer)
 
         self._scheduler = QComboBox()
-        self._scheduler.addItems(["CosineAnnealing", "StepLR", "ReduceLROnPlateau", "None"])
+        self._scheduler.addItems(["CosineAnnealing", "CosineWarmRestarts",
+                                  "StepLR", "ReduceLROnPlateau", "None"])
         self._scheduler.setCurrentText("CosineAnnealing")
+        self._scheduler.setToolTip(
+            "CosineAnnealing       — smooth decay to ~0 over the whole run\n"
+            "CosineWarmRestarts    — cyclic: decay, jump back up, repeat (SGDR)\n"
+            "StepLR                — drop 10× at 1/3 and 2/3 of the run\n"
+            "ReduceLROnPlateau     — halve when val loss stalls\n"
+            "None                  — constant LR"
+        )
         train_lay.addRow("LR scheduler:", self._scheduler)
+
+        # Warm-restart parameters — only meaningful for CosineWarmRestarts.
+        self._restart_period = QSpinBox()
+        self._restart_period.setRange(1, 9999)
+        self._restart_period.setValue(5)
+        self._restart_period.setToolTip(
+            "T_0: epochs in the first cycle before the LR restarts.\n"
+            "If this is ≥ total epochs, there is no restart — it becomes a "
+            "single truncated cosine decay."
+        )
+        train_lay.addRow("Restart period (T_0):", self._restart_period)
+
+        self._restart_mult = QSpinBox()
+        self._restart_mult.setRange(1, 16)
+        self._restart_mult.setValue(1)
+        self._restart_mult.setToolTip(
+            "T_mult: each cycle is this many times longer than the previous "
+            "one. 1 = every cycle is T_0 epochs; 2 = cycles of T_0, 2·T_0, "
+            "4·T_0, …"
+        )
+        train_lay.addRow("Restart mult (T_mult):", self._restart_mult)
+
+        self._scheduler.currentTextChanged.connect(self._on_scheduler_changed)
+        self._on_scheduler_changed(self._scheduler.currentText())
 
         self._loss_fn = QComboBox()
         self._loss_fn.addItems(["CrossEntropy", "FocalLoss"])
@@ -332,6 +396,48 @@ class SettingsPanel(QWidget):
             lambda t: self._focal_gamma.setEnabled(t == "FocalLoss")
         )
         self._focal_gamma.setEnabled(False)
+
+        # ── Class weighting ────────────────────────────────────────────────
+        # Re-weight the loss instead of re-sampling the data: every sample is
+        # still trained on, the majority class just counts less per example.
+        self._class_weight = QComboBox()
+        self._class_weight.addItems(["none", "effective_number", "inverse_freq"])
+        self._class_weight.setToolTip(
+            "Down-weight frequent classes in the loss, keeping every sample.\n"
+            "  none              — no weighting\n"
+            "  effective_number  — Cui et al. 2019, gentle at extreme ratios "
+            "(recommended for a ~50:1 background)\n"
+            "  inverse_freq      — w ∝ 1/count, stronger and simpler\n"
+            "Applies to both CrossEntropy and FocalLoss."
+        )
+        train_lay.addRow("Class weighting:", self._class_weight)
+
+        self._cw_beta = QDoubleSpinBox()
+        self._cw_beta.setDecimals(4)
+        self._cw_beta.setRange(0.0, 0.9999)
+        self._cw_beta.setSingleStep(0.001)
+        self._cw_beta.setValue(0.999)
+        self._cw_beta.setToolTip(
+            "Effective-number β. Higher = stronger down-weighting of frequent "
+            "classes. 0.999 or 0.9999 are usual for large imbalance."
+        )
+        train_lay.addRow("Weight β:", self._cw_beta)
+
+        self._cw_label = QLabel("—")
+        self._cw_label.setWordWrap(True)
+        train_lay.addRow("Weights:", self._cw_label)
+
+        self._btn_cw_preview = QPushButton("Preview weights")
+        self._btn_cw_preview.setToolTip(
+            "Count the train split and show the resulting weights without "
+            "training. The largest class is the one to watch — that is your "
+            "hard-negative bucket."
+        )
+        self._btn_cw_preview.clicked.connect(self._on_preview_weights)
+        train_lay.addRow("", self._btn_cw_preview)
+
+        self._class_weight.currentTextChanged.connect(self._on_class_weight_changed)
+        self._on_class_weight_changed(self._class_weight.currentText())
 
         self._lr = QDoubleSpinBox()
         self._lr.setDecimals(6)
@@ -591,7 +697,49 @@ class SettingsPanel(QWidget):
         self._btn_stats.setText("Compute from dataset")
         QMessageBox.critical(self, "Compute statistics", msg)
 
+    # ── Class-weight handlers ─────────────────────────────────────────────
+
+    def _on_class_weight_changed(self, mode: str) -> None:
+        on = mode != "none"
+        self._cw_beta.setEnabled(on and mode == "effective_number")
+        self._btn_cw_preview.setEnabled(on)
+        if not on:
+            self._cw_label.setText("—")
+
+    def _on_preview_weights(self) -> None:
+        h5 = self._h5_edit.text().strip()
+        if not h5 or not os.path.isfile(h5):
+            QMessageBox.warning(self, "Preview weights",
+                                f"H5 dataset not found:\n{h5}")
+            return
+        self._btn_cw_preview.setEnabled(False)
+        self._btn_cw_preview.setText("Counting…")
+        self._cw_worker = _WeightPreviewWorker(
+            h5, self._class_weight.currentText(), self._cw_beta.value())
+        self._cw_worker.sig_done.connect(self._on_weights_done)
+        self._cw_worker.sig_error.connect(self._on_weights_error)
+        self._cw_worker.start()
+
+    def _on_weights_done(self, names, counts, weights, hi) -> None:
+        self._btn_cw_preview.setEnabled(True)
+        self._btn_cw_preview.setText("Preview weights")
+        lo = min(weights)
+        self._cw_label.setText(
+            f"{len(weights)} classes · weights {lo:.3f}–{max(weights):.3f}\n"
+            f"largest '{names[hi]}' (n={counts[hi]}) → {weights[hi]:.3f}"
+        )
+
+    def _on_weights_error(self, msg: str) -> None:
+        self._btn_cw_preview.setEnabled(True)
+        self._btn_cw_preview.setText("Preview weights")
+        QMessageBox.critical(self, "Preview weights", msg)
+
     # ── Other handlers ────────────────────────────────────────────────────
+
+    def _on_scheduler_changed(self, name: str) -> None:
+        on = name == "CosineWarmRestarts"
+        self._restart_period.setEnabled(on)
+        self._restart_mult.setEnabled(on)
 
     def _on_backbone_changed(self, name: str) -> None:
         self._pretrained.setEnabled(name != "simple_cnn")
@@ -658,9 +806,16 @@ class SettingsPanel(QWidget):
         self._optimizer.setCurrentIndex(max(0, idx))
         idx = self._scheduler.findText(s.get("scheduler", "CosineAnnealing"))
         self._scheduler.setCurrentIndex(max(0, idx))
+        self._restart_period.setValue(int(s.get("restart_period", 5)))
+        self._restart_mult.setValue(int(s.get("restart_mult", 1)))
+        self._on_scheduler_changed(self._scheduler.currentText())
         idx = self._loss_fn.findText(s.get("loss_fn", "CrossEntropy"))
         self._loss_fn.setCurrentIndex(max(0, idx))
         self._focal_gamma.setValue(float(s.get("focal_gamma", 2.0)))
+        idx = self._class_weight.findText(s.get("class_weight_mode", "none"))
+        self._class_weight.setCurrentIndex(max(0, idx))
+        self._cw_beta.setValue(float(s.get("class_weight_beta", 0.999)))
+        self._on_class_weight_changed(self._class_weight.currentText())
         self._focal_gamma.setEnabled(s.get("loss_fn", "CrossEntropy") == "FocalLoss")
         self._lr.setValue(float(s.get("lr", 1e-3)))
         self._batch_size.setValue(int(s.get("batch_size", 32)))
@@ -715,8 +870,12 @@ class SettingsPanel(QWidget):
             "pretrained":       self._pretrained.isChecked(),
             "optimizer":        self._optimizer.currentText(),
             "scheduler":        self._scheduler.currentText(),
+            "restart_period":   self._restart_period.value(),
+            "restart_mult":     self._restart_mult.value(),
             "loss_fn":          self._loss_fn.currentText(),
             "focal_gamma":      self._focal_gamma.value(),
+            "class_weight_mode": self._class_weight.currentText(),
+            "class_weight_beta": self._cw_beta.value(),
             "lr":               self._lr.value(),
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),

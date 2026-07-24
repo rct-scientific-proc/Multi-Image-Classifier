@@ -53,6 +53,20 @@ def peek_h5_meta(h5_path: str) -> dict:
     }
 
 
+def count_labels(h5_path: str, split: int | None, num_classes: int) -> np.ndarray:
+    """Ground-truth sample count per class for *split* (None = all splits).
+
+    Reads only the tiny ``labels`` / ``split`` arrays, so it is cheap enough to
+    call from the GUI when previewing class weights. Hard negatives count under
+    their assigned label like any other sample.
+    """
+    with h5py.File(h5_path, "r") as f:
+        labels = f["labels"][:]
+        if split is not None:
+            labels = labels[f["split"][:] == split]
+    return np.bincount(labels.astype(np.int64), minlength=num_classes)
+
+
 class H5Dataset(Dataset):
     """PyTorch Dataset backed by a single HDF5 file.
 
