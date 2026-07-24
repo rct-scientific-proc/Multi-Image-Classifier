@@ -114,6 +114,9 @@ _DEFAULTS: dict = {
     "lr":               1e-3,
     "batch_size":       32,
     "epochs":           10,
+    "early_stopping":   False,
+    "patience":         10,
+    "min_delta":        0.0,
     "optimizer":        "Adam",
     "scheduler":        "CosineAnnealing",
     "restart_period":   5,
@@ -454,7 +457,46 @@ class SettingsPanel(QWidget):
         self._epochs = QSpinBox()
         self._epochs.setRange(1, 9999)
         self._epochs.setValue(10)
+        self._epochs.setToolTip(
+            "Maximum epochs. With early stopping on, a run may finish sooner."
+        )
         train_lay.addRow("Epochs:", self._epochs)
+
+        # ── Early stopping ─────────────────────────────────────────────────
+        self._early_stopping = QCheckBox("Stop when the target metric stops improving")
+        self._early_stopping.setToolTip(
+            "End the run once the validation target metric has not improved for "
+            "'Patience' epochs, and restore the best-seen weights.\n"
+            "best.pt already holds the best checkpoint regardless; this saves the "
+            "remaining epochs and guards against overfitting past the peak."
+        )
+        train_lay.addRow("Early stopping:", self._early_stopping)
+
+        self._patience = QSpinBox()
+        self._patience.setRange(1, 999)
+        self._patience.setValue(10)
+        self._patience.setToolTip(
+            "Epochs to wait without improvement before stopping.\n"
+            "With cyclic LR (CosineWarmRestarts) set this comfortably above the "
+            "restart period — the metric dips right after each LR spike, and you "
+            "want to give a cycle time to recover and beat the previous best."
+        )
+        train_lay.addRow("Patience:", self._patience)
+
+        self._min_delta = QDoubleSpinBox()
+        self._min_delta.setDecimals(4)
+        self._min_delta.setRange(0.0, 1.0)
+        self._min_delta.setSingleStep(0.001)
+        self._min_delta.setValue(0.0)
+        self._min_delta.setToolTip(
+            "Smallest change in the target metric that counts as an improvement. "
+            "Raise it to ignore noise-level wiggles so the patience counter can "
+            "actually advance. 0 = any strict improvement counts."
+        )
+        train_lay.addRow("Min. improvement:", self._min_delta)
+
+        self._early_stopping.toggled.connect(self._on_early_stopping_toggled)
+        self._on_early_stopping_toggled(self._early_stopping.isChecked())
 
         self._seed = QSpinBox()
         self._seed.setRange(0, 2_147_483_647)
@@ -741,6 +783,10 @@ class SettingsPanel(QWidget):
         self._restart_period.setEnabled(on)
         self._restart_mult.setEnabled(on)
 
+    def _on_early_stopping_toggled(self, on: bool) -> None:
+        self._patience.setEnabled(on)
+        self._min_delta.setEnabled(on)
+
     def _on_backbone_changed(self, name: str) -> None:
         self._pretrained.setEnabled(name != "simple_cnn")
 
@@ -820,6 +866,10 @@ class SettingsPanel(QWidget):
         self._lr.setValue(float(s.get("lr", 1e-3)))
         self._batch_size.setValue(int(s.get("batch_size", 32)))
         self._epochs.setValue(int(s.get("epochs", 10)))
+        self._early_stopping.setChecked(bool(s.get("early_stopping", False)))
+        self._patience.setValue(int(s.get("patience", 10)))
+        self._min_delta.setValue(float(s.get("min_delta", 0.0)))
+        self._on_early_stopping_toggled(self._early_stopping.isChecked())
         self._num_workers.setValue(int(s.get("num_workers", 0)))
         self._keep_last.setValue(int(s.get("keep_last", 3)))
         self._shuffle_every.setValue(int(s.get("shuffle_every_n_epochs", 1)))
@@ -879,6 +929,9 @@ class SettingsPanel(QWidget):
             "lr":               self._lr.value(),
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),
+            "early_stopping":   self._early_stopping.isChecked(),
+            "patience":         self._patience.value(),
+            "min_delta":        self._min_delta.value(),
             "num_workers":      self._num_workers.value(),
             "pin_memory":       self._pin_memory.isChecked(),
             "use_amp":          self._use_amp.isChecked(),

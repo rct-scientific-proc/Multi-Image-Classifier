@@ -25,6 +25,20 @@ def _is_better(new_val: float, old_val: float, metric: str) -> bool:
     return new_val >= old_val
 
 
+def is_improvement(new_val: float, old_val: float, metric: str,
+                   min_delta: float = 0.0) -> bool:
+    """Strict improvement of *new_val* over *old_val* by at least *min_delta*.
+
+    Unlike ``_is_better`` (which counts a tie as better, so best.pt keeps the
+    latest of equal checkpoints), this is strict: a tie or a sub-min_delta gain
+    is *not* an improvement. That is what early stopping needs — it must let the
+    patience counter advance through noise, or it would never trigger.
+    """
+    if metric in _MINIMISE:
+        return new_val < old_val - min_delta
+    return new_val > old_val + min_delta
+
+
 def checkpoint_name(
     epoch: int,
     val_accuracy: float,

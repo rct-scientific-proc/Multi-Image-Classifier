@@ -166,6 +166,9 @@ class TrainingWorker(QThread):
                     f"{info['target_metric']}={info['target_val']:.4f}  "
                     f"lr={info['lr']:.2e}"
                 )
+                if info.get("early_stopped"):
+                    self.sig_log.emit(f"[INFO] {info['stop_reason']} "
+                                      f"Best weights restored.")
 
             trainer = Trainer(
                 model=model,
@@ -188,6 +191,9 @@ class TrainingWorker(QThread):
                 augment=augment,
                 normalizer=normalizer,
                 seed=s.get("seed"),
+                early_stopping=bool(s.get("early_stopping", False)),
+                patience=int(s.get("patience", 10)),
+                min_delta=float(s.get("min_delta", 0.0)),
             )
 
             self.sig_log.emit(

@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 
 from src.augment import GpuAugment, Normalizer
 from src.metrics import MetricTracker, DEFAULT_TARGET_METRIC
-from src.checkpoints import save_checkpoint
+from src.checkpoints import save_checkpoint, is_improvement
 from src.logger import ExperimentLogger
 
 
@@ -138,6 +138,10 @@ class Trainer:
         augment: "GpuAugment | None" = None,
         normalizer: "Normalizer | None" = None,
         seed: int | None = None,
+        early_stopping: bool = False,
+        patience: int = 10,
+        min_delta: float = 0.0,
+        restore_best: bool = True,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -169,6 +173,12 @@ class Trainer:
         # must match at inference, so its stats go into the checkpoint (see fit).
         self.augment    = augment.to(device) if augment is not None else None
         self.normalizer = normalizer.to(device) if normalizer is not None else None
+        # Early stopping — patience on the *target* metric, same metric best.pt
+        # tracks, so "best for early stopping" and best.pt always agree.
+        self.early_stopping = bool(early_stopping)
+        self.patience       = int(patience)
+        self.min_delta      = float(min_delta)
+        self.restore_best   = bool(restore_best)
 
     # ------------------------------------------------------------------
     def _prepare_batch(self, images: torch.Tensor, training: bool) -> torch.Tensor:
@@ -289,6 +299,16 @@ class Trainer:
         if self.augment is not None:
             hyperparams.update(self.augment.config)
 
+        # Early-stopping state. best_state is kept in memory (on CPU) so a
+        # restore does not depend on best.pt existing on disk, and the counter
+        # resets on any genuine improvement — which, under cyclic LR, happens at
+        # each cycle's minimum, so a plateau across cycles is what stops the run.
+        best_value: float | None = None
+        best_epoch = start_epoch
+        best_state = None
+        epochs_no_improve = 0
+        stop_reason = ""
+
         for epoch in range(start_epoch, epochs):
             if self.cancel_event.is_set():
                 break
@@ -313,6 +333,30 @@ class Trainer:
 
             target_val = val_metrics.get(self.target_metric, 0.0)
 
+            # ---- early-stopping bookkeeping (before info, so the flags ride
+            #      along on the same full dict the GUI already knows how to read)
+            improved = best_value is None or is_improvement(
+                target_val, best_value, self.target_metric, self.min_delta)
+            if improved:
+                best_value = target_val
+                best_epoch = epoch
+                epochs_no_improve = 0
+                if self.early_stopping and self.restore_best:
+                    # Snapshot to CPU so a second model's worth of GPU memory is
+                    # not pinned for the whole run.
+                    best_state = {k: v.detach().cpu().clone()
+                                  for k, v in self.model.state_dict().items()}
+            else:
+                epochs_no_improve += 1
+            should_stop = (self.early_stopping and self.patience > 0
+                           and epochs_no_improve >= self.patience)
+            if should_stop:
+                stop_reason = (
+                    f"Early stop at epoch {epoch}: no improvement in "
+                    f"{self.target_metric} for {epochs_no_improve} epochs "
+                    f"(best {best_value:.4f} at epoch {best_epoch})."
+                )
+
             info = {
                 "epoch":          epoch,
                 "train_loss":     train_metrics["avg_loss"],
@@ -324,7 +368,13 @@ class Trainer:
                 "lr":             lr,
                 "val_metrics":    val_metrics,
                 "train_metrics":  train_metrics,
+                "epochs_no_improve": epochs_no_improve,
+                "best_epoch":     best_epoch,
+                "best_target_val": best_value,
             }
+            if should_stop:
+                info["early_stopped"] = True
+                info["stop_reason"]   = stop_reason
 
             save_checkpoint(
                 checkpoint_dir=checkpoint_dir,
@@ -345,6 +395,15 @@ class Trainer:
 
             if self.on_epoch_end is not None:
                 self.on_epoch_end(info)
+
+            if should_stop:
+                break
+
+        # Restore the best-seen weights into the live model. best.pt already
+        # holds them on disk, so this matters for anything that keeps using the
+        # model object after fit() returns; it is a no-op if no epoch ran.
+        if self.early_stopping and self.restore_best and best_state is not None:
+            self.model.load_state_dict(best_state)
 
         if self.logger is not None:
             best_ckpt_path = Path(checkpoint_dir) / "best.pt"
