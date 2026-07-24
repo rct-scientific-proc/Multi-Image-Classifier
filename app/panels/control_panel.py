@@ -166,6 +166,8 @@ class TrainingWorker(QThread):
                     f"{info['target_metric']}={info['target_val']:.4f}  "
                     f"lr={info['lr']:.2e}"
                 )
+                if info.get("restarted"):
+                    self.sig_log.emit(f"[INFO] {info['restart_message']}")
                 if info.get("early_stopped"):
                     self.sig_log.emit(f"[INFO] {info['stop_reason']} "
                                       f"Best weights restored.")
@@ -194,6 +196,10 @@ class TrainingWorker(QThread):
                 early_stopping=bool(s.get("early_stopping", False)),
                 patience=int(s.get("patience", 10)),
                 min_delta=float(s.get("min_delta", 0.0)),
+                smart_training=bool(s.get("smart_training", False)),
+                max_restarts=int(s.get("max_restarts", 3)),
+                restart_lr_factor=float(s.get("restart_lr_factor", 1.0)),
+                restart_from_best=bool(s.get("restart_from_best", True)),
             )
 
             self.sig_log.emit(

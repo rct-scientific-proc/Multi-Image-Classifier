@@ -21,6 +21,7 @@ Usage:
     trainer.fit(epochs=20, checkpoint_dir="checkpoints", hyperparams={})
 """
 
+import math
 import threading
 from pathlib import Path
 from typing import Callable
@@ -142,6 +143,10 @@ class Trainer:
         patience: int = 10,
         min_delta: float = 0.0,
         restore_best: bool = True,
+        smart_training: bool = False,
+        max_restarts: int = 3,
+        restart_lr_factor: float = 1.0,
+        restart_from_best: bool = True,
     ):
         self.model        = model.to(device)
         self.optimizer    = optimizer
@@ -179,6 +184,16 @@ class Trainer:
         self.patience       = int(patience)
         self.min_delta      = float(min_delta)
         self.restore_best   = bool(restore_best)
+        # Smart training — a plateau (patience epochs without improvement) spikes
+        # the LR to escape the basin instead of stopping, optionally rewinding to
+        # the best weights first. After max_restarts *consecutive unproductive*
+        # restarts it gives up and stops. When on, it owns the LR (the scheduler
+        # is bypassed) and its give-up supersedes plain early stopping. It shares
+        # `patience` / `min_delta` with early stopping — the same plateau window.
+        self.smart_training    = bool(smart_training)
+        self.max_restarts      = int(max_restarts)
+        self.restart_lr_factor = float(restart_lr_factor)
+        self.restart_from_best = bool(restart_from_best)
 
     # ------------------------------------------------------------------
     def _prepare_batch(self, images: torch.Tensor, training: bool) -> torch.Tensor:
@@ -309,9 +324,27 @@ class Trainer:
         epochs_no_improve = 0
         stop_reason = ""
 
+        # Smart-training state. base_lrs is captured once so a restart can spike
+        # back to the run's original LR; epochs_in_cycle drives the within-cycle
+        # cosine decay and resets on each restart.
+        base_lrs = [g["lr"] for g in self.optimizer.param_groups]
+        epochs_in_cycle = 0
+        restarts_used = 0
+
         for epoch in range(start_epoch, epochs):
             if self.cancel_event.is_set():
                 break
+
+            # Smart training owns the LR: a cosine decay from the (spiked) peak
+            # over `patience` epochs, floored at 5% so a long cycle cannot stall
+            # at zero. epoch 0 of a cycle sits at the peak.
+            if self.smart_training:
+                horizon = max(self.patience, 1)
+                t = min(epochs_in_cycle, horizon)
+                scale = 0.05 + 0.95 * 0.5 * (1.0 + math.cos(math.pi * t / horizon))
+                for g, base in zip(self.optimizer.param_groups, base_lrs):
+                    g["lr"] = base * self.restart_lr_factor * scale
+                epochs_in_cycle += 1
 
             sampler = self.train_loader.sampler
             if hasattr(sampler, "set_epoch"):
@@ -320,7 +353,9 @@ class Trainer:
             train_metrics = self.train_one_epoch(epoch)
             val_metrics   = self.validate(epoch)
 
-            if self.scheduler is not None:
+            # The scheduler is bypassed under smart training, which sets the LR
+            # itself above — otherwise the two would fight over param_groups.
+            if self.scheduler is not None and not self.smart_training:
                 if isinstance(
                     self.scheduler,
                     torch.optim.lr_scheduler.ReduceLROnPlateau
@@ -333,24 +368,66 @@ class Trainer:
 
             target_val = val_metrics.get(self.target_metric, 0.0)
 
-            # ---- early-stopping bookkeeping (before info, so the flags ride
-            #      along on the same full dict the GUI already knows how to read)
+            # ---- plateau bookkeeping (before info, so the flags ride along on
+            #      the same full dict the GUI already knows how to read) ----
             improved = best_value is None or is_improvement(
                 target_val, best_value, self.target_metric, self.min_delta)
             if improved:
                 best_value = target_val
                 best_epoch = epoch
                 epochs_no_improve = 0
-                if self.early_stopping and self.restore_best:
+                # A productive epoch refills the restart budget: restarts only
+                # "give up" after max_restarts in a row that beat nothing.
+                restarts_used = 0
+                if (self.early_stopping or self.smart_training) and self.restore_best:
                     # Snapshot to CPU so a second model's worth of GPU memory is
                     # not pinned for the whole run.
                     best_state = {k: v.detach().cpu().clone()
                                   for k, v in self.model.state_dict().items()}
             else:
                 epochs_no_improve += 1
-            should_stop = (self.early_stopping and self.patience > 0
-                           and epochs_no_improve >= self.patience)
-            if should_stop:
+
+            plateau = self.patience > 0 and epochs_no_improve >= self.patience
+            should_stop = False
+            restarted = False
+            restart_msg = ""
+
+            if self.smart_training and plateau:
+                restarts_used += 1
+                if restarts_used > self.max_restarts:
+                    should_stop = True
+                    stop_reason = (
+                        f"Smart training gave up at epoch {epoch}: "
+                        f"{self.max_restarts} restarts without beating the best "
+                        f"{self.target_metric} ({best_value:.4f} at epoch "
+                        f"{best_epoch})."
+                    )
+                else:
+                    # Rewind to the best weights when the current model has
+                    # drifted below them — explore outward from the good point,
+                    # not from a worse one.
+                    rewound = False
+                    if (self.restart_from_best and best_state is not None
+                            and is_improvement(best_value, target_val,
+                                               self.target_metric)):
+                        self.model.load_state_dict(
+                            {k: v.to(self.device) for k, v in best_state.items()})
+                        rewound = True
+                    # Perturb: reset the optimizer's momentum/variance history so
+                    # it does not simply retrace its path, and restart the LR
+                    # cosine (the spike takes effect on the next epoch's top).
+                    self.optimizer.state.clear()
+                    epochs_in_cycle = 0
+                    epochs_no_improve = 0
+                    restarted = True
+                    restart_msg = (
+                        f"Restart {restarts_used}/{self.max_restarts} at epoch "
+                        f"{epoch}: LR spiked"
+                        + (" and weights rewound to best" if rewound else "")
+                        + "."
+                    )
+            elif self.early_stopping and plateau:
+                should_stop = True
                 stop_reason = (
                     f"Early stop at epoch {epoch}: no improvement in "
                     f"{self.target_metric} for {epochs_no_improve} epochs "
@@ -371,7 +448,11 @@ class Trainer:
                 "epochs_no_improve": epochs_no_improve,
                 "best_epoch":     best_epoch,
                 "best_target_val": best_value,
+                "restarts_used":  restarts_used,
             }
+            if restarted:
+                info["restarted"]       = True
+                info["restart_message"] = restart_msg
             if should_stop:
                 info["early_stopped"] = True
                 info["stop_reason"]   = stop_reason
@@ -402,8 +483,10 @@ class Trainer:
         # Restore the best-seen weights into the live model. best.pt already
         # holds them on disk, so this matters for anything that keeps using the
         # model object after fit() returns; it is a no-op if no epoch ran.
-        if self.early_stopping and self.restore_best and best_state is not None:
-            self.model.load_state_dict(best_state)
+        if ((self.early_stopping or self.smart_training) and self.restore_best
+                and best_state is not None):
+            self.model.load_state_dict(
+                {k: v.to(self.device) for k, v in best_state.items()})
 
         if self.logger is not None:
             best_ckpt_path = Path(checkpoint_dir) / "best.pt"

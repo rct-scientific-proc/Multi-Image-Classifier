@@ -117,6 +117,10 @@ _DEFAULTS: dict = {
     "early_stopping":   False,
     "patience":         10,
     "min_delta":        0.0,
+    "smart_training":   False,
+    "max_restarts":     3,
+    "restart_lr_factor": 1.0,
+    "restart_from_best": True,
     "optimizer":        "Adam",
     "scheduler":        "CosineAnnealing",
     "restart_period":   5,
@@ -498,6 +502,51 @@ class SettingsPanel(QWidget):
         self._early_stopping.toggled.connect(self._on_early_stopping_toggled)
         self._on_early_stopping_toggled(self._early_stopping.isChecked())
 
+        # ── Smart training (plateau-triggered LR restarts) ─────────────────
+        self._smart_training = QCheckBox("Restart on plateau to escape local minima")
+        self._smart_training.setToolTip(
+            "On a plateau (same 'Patience' window as early stopping) spike the "
+            "learning rate to jump out of the current basin, optionally rewinding "
+            "to the best weights first, instead of stopping.\n"
+            "After 'Max restarts' consecutive restarts that fail to beat the best, "
+            "it gives up and stops (restoring best). While on, it manages the LR "
+            "itself — the LR scheduler above is bypassed."
+        )
+        train_lay.addRow("Smart training:", self._smart_training)
+
+        self._max_restarts = QSpinBox()
+        self._max_restarts.setRange(1, 50)
+        self._max_restarts.setValue(3)
+        self._max_restarts.setToolTip(
+            "How many consecutive restarts that don't beat the best are allowed "
+            "before giving up. A restart that reaches a new best refills the budget."
+        )
+        train_lay.addRow("Max restarts:", self._max_restarts)
+
+        self._restart_lr_factor = QDoubleSpinBox()
+        self._restart_lr_factor.setDecimals(2)
+        self._restart_lr_factor.setRange(0.1, 5.0)
+        self._restart_lr_factor.setSingleStep(0.1)
+        self._restart_lr_factor.setValue(1.0)
+        self._restart_lr_factor.setToolTip(
+            "The LR each restart spikes to, as a multiple of the base learning "
+            "rate. 1.0 = back to the starting LR; lower for a gentler kick."
+        )
+        train_lay.addRow("Restart LR ×:", self._restart_lr_factor)
+
+        self._restart_from_best = QCheckBox("Rewind to best weights on restart")
+        self._restart_from_best.setChecked(True)
+        self._restart_from_best.setToolTip(
+            "Before spiking the LR, reload the best-seen weights if the current "
+            "model has drifted below them — explore outward from the good point "
+            "rather than from a worse one. The safety net that keeps a bad cycle "
+            "from compounding."
+        )
+        train_lay.addRow("", self._restart_from_best)
+
+        self._smart_training.toggled.connect(self._on_smart_training_toggled)
+        self._on_smart_training_toggled(self._smart_training.isChecked())
+
         self._seed = QSpinBox()
         self._seed.setRange(0, 2_147_483_647)
         self._seed.setValue(0)
@@ -784,8 +833,21 @@ class SettingsPanel(QWidget):
         self._restart_mult.setEnabled(on)
 
     def _on_early_stopping_toggled(self, on: bool) -> None:
-        self._patience.setEnabled(on)
-        self._min_delta.setEnabled(on)
+        # patience/min_delta drive both early stopping and smart training's
+        # plateau window, so they stay enabled if either is on. getattr guards
+        # the construction-time call, which fires before _smart_training exists.
+        smart = getattr(self, "_smart_training", None)
+        active = on or (smart is not None and smart.isChecked())
+        self._patience.setEnabled(active)
+        self._min_delta.setEnabled(active)
+
+    def _on_smart_training_toggled(self, on: bool) -> None:
+        self._max_restarts.setEnabled(on)
+        self._restart_lr_factor.setEnabled(on)
+        self._restart_from_best.setEnabled(on)
+        # Smart training also uses the plateau window.
+        self._patience.setEnabled(on or self._early_stopping.isChecked())
+        self._min_delta.setEnabled(on or self._early_stopping.isChecked())
 
     def _on_backbone_changed(self, name: str) -> None:
         self._pretrained.setEnabled(name != "simple_cnn")
@@ -869,7 +931,12 @@ class SettingsPanel(QWidget):
         self._early_stopping.setChecked(bool(s.get("early_stopping", False)))
         self._patience.setValue(int(s.get("patience", 10)))
         self._min_delta.setValue(float(s.get("min_delta", 0.0)))
+        self._smart_training.setChecked(bool(s.get("smart_training", False)))
+        self._max_restarts.setValue(int(s.get("max_restarts", 3)))
+        self._restart_lr_factor.setValue(float(s.get("restart_lr_factor", 1.0)))
+        self._restart_from_best.setChecked(bool(s.get("restart_from_best", True)))
         self._on_early_stopping_toggled(self._early_stopping.isChecked())
+        self._on_smart_training_toggled(self._smart_training.isChecked())
         self._num_workers.setValue(int(s.get("num_workers", 0)))
         self._keep_last.setValue(int(s.get("keep_last", 3)))
         self._shuffle_every.setValue(int(s.get("shuffle_every_n_epochs", 1)))
@@ -932,6 +999,10 @@ class SettingsPanel(QWidget):
             "early_stopping":   self._early_stopping.isChecked(),
             "patience":         self._patience.value(),
             "min_delta":        self._min_delta.value(),
+            "smart_training":   self._smart_training.isChecked(),
+            "max_restarts":     self._max_restarts.value(),
+            "restart_lr_factor": self._restart_lr_factor.value(),
+            "restart_from_best": self._restart_from_best.isChecked(),
             "num_workers":      self._num_workers.value(),
             "pin_memory":       self._pin_memory.isChecked(),
             "use_amp":          self._use_amp.isChecked(),
