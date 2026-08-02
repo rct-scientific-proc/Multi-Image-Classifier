@@ -116,7 +116,6 @@ class InferenceWorker(QThread):
 
             backbone    = hp.get("backbone", "simple_cnn")
             in_channels = int(hp.get("in_channels", 1))
-            pretrained  = bool(hp.get("pretrained", False))
 
             self.sig_log.emit(f"Loading test split from: {self._h5_path}")
             test_ds = H5Dataset(self._h5_path, split=SPLIT_TEST)
@@ -139,11 +138,15 @@ class InferenceWorker(QThread):
                 f"Building model: {backbone} (in_channels={in_channels}, "
                 f"num_classes={num_classes})"
             )
+            # pretrained=False even when the run used ImageNet weights: the
+            # checkpoint's state dict overwrites every weight on the next line,
+            # so honouring the flag only bought a download — fatal on an
+            # offline machine. src/inference.py already does the same.
             model = build_model(
                 backbone_name=backbone,
                 in_channels=in_channels,
                 num_classes=num_classes,
-                pretrained=pretrained,
+                pretrained=False,
             )
             model.load_state_dict(ckpt["model_state_dict"])
             model.to(self._device).eval()

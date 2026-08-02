@@ -32,7 +32,7 @@ from src.dataset import (
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
 from src.metrics import parse_target_list
-from src.model import build_model
+from src.model import build_model, find_local_weights
 from src.trainer import FocalLoss, Trainer, class_weights
 
 
@@ -103,11 +103,26 @@ class TrainingWorker(QThread):
             )
 
             self.sig_log.emit(f"Building model: {s['backbone']}")
+            # Say where pretrained weights come from before they are needed —
+            # on an offline machine the local/download difference is the
+            # difference between training and a URLError.
+            weights_dir = s.get("weights_dir", "")
+            if s["pretrained"] and s["backbone"] != "simple_cnn":
+                local = find_local_weights(s["backbone"], weights_dir)
+                if local is not None:
+                    self.sig_log.emit(f"  Pretrained weights (local): {local}")
+                else:
+                    self.sig_log.emit(
+                        "[WARN] No local weight file for this backbone "
+                        "(Models menu) — torchvision will download it, which "
+                        "fails without internet access."
+                    )
             model = build_model(
                 backbone_name=s["backbone"],
                 in_channels=s["in_channels"],
                 num_classes=num_classes,
                 pretrained=s["pretrained"],
+                weights_dir=weights_dir,
             )
 
             optimizer = _build_optimizer(model, s)

@@ -158,6 +158,29 @@ is involved, so you can validate the core logic independently.
 
 ---
 
+## Phase 15 — Pretrained weights on offline machines (Models menu)
+
+- [x] `src/model.py` — `download_pretrained_weights()` fetches a backbone's
+      ImageNet weights into a chosen folder (torch.hub download: temp file +
+      sha256 check, so an interrupted transfer never leaves a plausible file);
+      `build_model(..., weights_dir=...)` loads from that folder instead of the
+      network when the file is present
+- [x] Models menu — Download Weights (current / all backbones) on a QThread
+      worker, Set Weights Folder (verifies the copy, lists what it found),
+      Clear. Folder persisted in settings; shown read-only on the Model page
+- [x] Training log states the weight source (local file vs download) before
+      the model is built
+- [x] `InferenceWorker` no longer honours the checkpoint's `pretrained` flag —
+      the state dict overwrites every weight anyway, and the flag only bought
+      an ImageNet download that fails offline
+- [x] Fixed `mobilenet_v3_small` head config: `in_features` was read from
+      `classifier[0]` (576) but the replacement swaps the last linear, which
+      takes 1024 — every forward pass crashed. Found by the first real
+      end-to-end test; all six backbones now forward-pass tested at 1 and 3
+      channels
+
+---
+
 ## Suggested file structure
 
 ```

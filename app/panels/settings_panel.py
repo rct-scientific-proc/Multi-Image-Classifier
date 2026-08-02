@@ -130,6 +130,9 @@ _DEFAULTS: dict = {
     "class_weight_mode": "none",
     "class_weight_beta": 0.999,
     "pretrained":       False,
+    # Folder of pre-downloaded ImageNet weights (Models menu). Empty = let
+    # torchvision download them, which needs internet access.
+    "weights_dir":      "",
     "target_metric":    DEFAULT_TARGET_METRIC,
     "device":           "cuda" if torch.cuda.is_available() else "cpu",
     "checkpoint_dir":   "checkpoints",
@@ -162,6 +165,9 @@ class SettingsPanel(QWidget):
         # Set before _load_from_file: _apply_settings is the only other writer
         # and it never runs when there is no settings file yet.
         self._theme = DEFAULT_THEME
+        # No widget of its own — set from the Models menu, shown on the Model
+        # page as a read-only status line below the pretrained checkbox.
+        self._weights_dir = ""
 
         # ── tabbed container ──────────────────────────────────────────────
         # One 24-row form meant every new option lengthened a single 1025px
@@ -340,7 +346,19 @@ class SettingsPanel(QWidget):
         model_lay.addRow("Backbone:", self._backbone)
 
         self._pretrained = QCheckBox("Use pretrained weights")
+        self._pretrained.setToolTip(
+            "Start from ImageNet weights instead of random initialisation.\n"
+            "On a machine without internet access, first set a weights folder "
+            "via the Models menu — otherwise torchvision has to download them."
+        )
         model_lay.addRow("", self._pretrained)
+
+        # Read-only: the Models menu owns this value. The row exists so the
+        # offline setup is visible where the pretrained checkbox is, rather
+        # than only inside a menu dialog.
+        self._weights_dir_label = QLabel("not set — weights are downloaded")
+        self._weights_dir_label.setWordWrap(True)
+        model_lay.addRow("Weights folder:", self._weights_dir_label)
 
         # ── Optimizer ─────────────────────────────────────────────────────
         self._optimizer = QComboBox()
@@ -910,6 +928,7 @@ class SettingsPanel(QWidget):
         self._backbone.setCurrentIndex(max(0, idx))
         self._in_channels.setValue(int(s.get("in_channels", 1)))
         self._pretrained.setChecked(bool(s.get("pretrained", False)))
+        self.weights_dir = str(s.get("weights_dir", ""))
         idx = self._optimizer.findText(s.get("optimizer", "Adam"))
         self._optimizer.setCurrentIndex(max(0, idx))
         idx = self._scheduler.findText(s.get("scheduler", "CosineAnnealing"))
@@ -985,6 +1004,7 @@ class SettingsPanel(QWidget):
             "backbone":         self._backbone.currentText(),
             "in_channels":      self._in_channels.value(),
             "pretrained":       self._pretrained.isChecked(),
+            "weights_dir":      self._weights_dir,
             "optimizer":        self._optimizer.currentText(),
             "scheduler":        self._scheduler.currentText(),
             "restart_period":   self._restart_period.value(),
@@ -1026,6 +1046,18 @@ class SettingsPanel(QWidget):
             **{key: getattr(self, attr).value()
                for key, attr in self._AUG_WIDGETS.items()},
         }
+
+    @property
+    def weights_dir(self) -> str:
+        """Folder of pre-downloaded ImageNet weights ("" = download instead).
+        Owned by the Models menu; persisted with the other settings."""
+        return self._weights_dir
+
+    @weights_dir.setter
+    def weights_dir(self, path: str) -> None:
+        self._weights_dir = path.strip()
+        self._weights_dir_label.setText(
+            self._weights_dir or "not set — weights are downloaded")
 
     @property
     def theme(self) -> str:

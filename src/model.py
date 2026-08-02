@@ -8,15 +8,29 @@ Two options:
 
 Both accept in_channels=1 (grayscale) or in_channels=3 (RGB).
 
+Offline machines: `pretrained=True` normally makes torchvision download the
+ImageNet weights on first use, which fails without internet access. Instead,
+run `download_pretrained_weights()` on a connected machine (Models menu in the
+GUI), copy the folder across, and pass it as `weights_dir` — the weights are
+then read from disk and the network is never touched.
+
 Usage:
     from src.model import build_model
 
     # Small custom CNN
     model = build_model("simple_cnn", in_channels=1, num_classes=11)
 
-    # Torchvision backbone
+    # Torchvision backbone (downloads ImageNet weights on first use)
     model = build_model("resnet18", in_channels=1, num_classes=11, pretrained=True)
+
+    # Same, but weights come from a folder copied onto an offline machine
+    model = build_model("resnet18", in_channels=1, num_classes=11,
+                        pretrained=True, weights_dir="pretrained_weights")
 """
+
+import re
+from pathlib import Path
+from urllib.parse import urlparse
 
 import torch
 import torch.nn as nn
@@ -82,10 +96,67 @@ _BACKBONE_CONFIGS: dict[str, dict] = {
     "resnet50":        {"builder": models.resnet50,        "head_attr": "fc",         "in_features": lambda m: m.fc.in_features},
     "efficientnet_b0": {"builder": models.efficientnet_b0, "head_attr": "classifier", "in_features": lambda m: m.classifier[1].in_features},
     "efficientnet_b1": {"builder": models.efficientnet_b1, "head_attr": "classifier", "in_features": lambda m: m.classifier[1].in_features},
-    "mobilenet_v3_small": {"builder": models.mobilenet_v3_small, "head_attr": "classifier", "in_features": lambda m: m.classifier[0].in_features},
+    # [-1], not [0]: this classifier is Linear(576,1024) → Hardswish → Dropout
+    # → Linear(1024, n), and the replacement below swaps the LAST linear — so
+    # the new head must accept that layer's 1024 inputs, not the first's 576.
+    "mobilenet_v3_small": {"builder": models.mobilenet_v3_small, "head_attr": "classifier", "in_features": lambda m: m.classifier[-1].in_features},
 }
 
-AVAILABLE_BACKBONES = ["simple_cnn"] + list(_BACKBONE_CONFIGS.keys())
+# Backbones with downloadable ImageNet weights — everything but simple_cnn.
+PRETRAINED_BACKBONES = list(_BACKBONE_CONFIGS.keys())
+
+AVAILABLE_BACKBONES = ["simple_cnn"] + PRETRAINED_BACKBONES
+
+
+# ---------------------------------------------------------------------------
+# Pretrained weight files (offline support)
+# ---------------------------------------------------------------------------
+
+def pretrained_weights_url(backbone_name: str) -> str:
+    """The download URL of *backbone_name*'s DEFAULT ImageNet weights."""
+    if backbone_name not in _BACKBONE_CONFIGS:
+        raise ValueError(
+            f"'{backbone_name}' has no pretrained weights. "
+            f"Choose from: {PRETRAINED_BACKBONES}"
+        )
+    return models.get_model_weights(backbone_name).DEFAULT.url
+
+
+def pretrained_weights_filename(backbone_name: str) -> str:
+    """torchvision's own filename for the weights, e.g. resnet18-f37072fd.pth."""
+    return Path(urlparse(pretrained_weights_url(backbone_name)).path).name
+
+
+def find_local_weights(backbone_name: str, weights_dir: str | None) -> Path | None:
+    """The weight file for *backbone_name* inside *weights_dir*, if present."""
+    if not weights_dir or backbone_name not in _BACKBONE_CONFIGS:
+        return None
+    path = Path(weights_dir) / pretrained_weights_filename(backbone_name)
+    return path if path.is_file() else None
+
+
+def download_pretrained_weights(backbone_name: str, weights_dir: str,
+                                progress: bool = False) -> Path:
+    """Fetch *backbone_name*'s ImageNet weights into *weights_dir*.
+
+    Copy the folder to an offline machine and pass it to build_model as
+    `weights_dir`. Returns the file path; skips the download when the file is
+    already there. torch.hub verifies the sha256 prefix embedded in the
+    filename and downloads via a temp file, so an interrupted or corrupted
+    transfer never leaves a plausible-looking `.pth` behind.
+    """
+    url = pretrained_weights_url(backbone_name)
+    target = Path(weights_dir) / pretrained_weights_filename(backbone_name)
+    if target.is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    match = re.search(r"-([0-9a-f]{8,})\.", target.name)
+    torch.hub.download_url_to_file(
+        url, str(target),
+        hash_prefix=match.group(1) if match else None,
+        progress=progress,
+    )
+    return target
 
 
 class BackboneModel(nn.Module):
@@ -101,12 +172,20 @@ class BackboneModel(nn.Module):
         in_channels: int = 3,
         num_classes: int = 11,
         pretrained: bool = False,
+        weights_path: str | Path | None = None,
     ):
         super().__init__()
 
-        cfg     = _BACKBONE_CONFIGS[backbone_name]
-        weights = "DEFAULT" if pretrained else None
-        base    = cfg["builder"](weights=weights)
+        cfg = _BACKBONE_CONFIGS[backbone_name]
+        if weights_path is not None:
+            # Offline path: build empty, then load the copied weight file.
+            base = cfg["builder"](weights=None)
+            # weights_only=True — a state dict is all this file should contain.
+            state = torch.load(str(weights_path), map_location="cpu",
+                               weights_only=True)
+            base.load_state_dict(state)
+        else:
+            base = cfg["builder"](weights="DEFAULT" if pretrained else None)
 
         # Channel adapter — keeps pretrained conv1 weights intact
         self.channel_adapter = (
@@ -144,6 +223,7 @@ def build_model(
     in_channels: int = 1,
     num_classes: int = 11,
     pretrained: bool = False,
+    weights_dir: str | None = None,
 ) -> nn.Module:
     """Build and return a model by name.
 
@@ -157,6 +237,12 @@ def build_model(
         Number of output classes (including hard_negative if used).
     pretrained:
         Load ImageNet weights (ignored for simple_cnn).
+    weights_dir:
+        Folder of pre-downloaded weight files (see
+        ``download_pretrained_weights``). When it holds this backbone's file,
+        the weights are read from disk and nothing is downloaded — the offline
+        case. Otherwise torchvision downloads as usual. Ignored unless
+        *pretrained*.
     """
     if backbone_name == "simple_cnn":
         return SimpleCNN(in_channels=in_channels, num_classes=num_classes)
@@ -167,9 +253,12 @@ def build_model(
             f"Choose from: {AVAILABLE_BACKBONES}"
         )
 
+    weights_path = find_local_weights(backbone_name, weights_dir) if pretrained else None
+
     return BackboneModel(
         backbone_name=backbone_name,
         in_channels=in_channels,
         num_classes=num_classes,
         pretrained=pretrained,
+        weights_path=weights_path,
     )
