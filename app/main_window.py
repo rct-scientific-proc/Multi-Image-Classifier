@@ -24,6 +24,7 @@ from app.panels.inference_panel   import InferencePanel
 from app.panels.console_panel     import ConsolePanel
 from app.panels.metrics_panel     import MetricsPanel
 from app.panels.preview_panel     import PreviewPanel
+from app.panels.class_preview_panel import ClassPreviewPanel
 from app.panels.checkpoint_panel  import CheckpointPanel
 from app.panels.tensorboard_panel import TensorBoardPanel
 
@@ -78,10 +79,12 @@ class MainWindow(QMainWindow):
         self.console_panel = ConsolePanel()
         self.metrics_panel = MetricsPanel()
         self.preview_panel = PreviewPanel(self.settings_panel)
+        self.class_preview_panel = ClassPreviewPanel(self.settings_panel)
         centre = QTabWidget()
         centre.addTab(self.console_panel, "Log")
         centre.addTab(self.metrics_panel, "Metrics")
         centre.addTab(self.preview_panel, "Augment preview")
+        centre.addTab(self.class_preview_panel, "Preview")
         fit_tabs(centre, min_width=160)
         self.centre_tabs = centre
         self.setCentralWidget(centre)
@@ -140,6 +143,7 @@ class MainWindow(QMainWindow):
         self.control_panel.sig_log_message.connect(self.console_panel.append_message)
         self.inference_panel.sig_log_message.connect(self.console_panel.append_message)
         self.preview_panel.sig_log_message.connect(self.console_panel.append_message)
+        self.class_preview_panel.sig_log_message.connect(self.console_panel.append_message)
         self.control_panel.sig_epoch_complete.connect(self._on_epoch_complete)
         self.control_panel.sig_epoch_complete.connect(self.metrics_panel.add_epoch)
         self.control_panel.sig_training_finished.connect(self._on_training_finished)
