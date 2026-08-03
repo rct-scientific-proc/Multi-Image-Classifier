@@ -75,27 +75,35 @@ class _StatsWorker(QThread):
 class _WeightPreviewWorker(QThread):
     """Counts the train split and computes class weights off the GUI thread."""
 
-    # (labels, counts, weights) as plain lists, plus the largest-class index.
-    sig_done = pyqtSignal(list, list, list, int)
+    # (labels, counts, weights) as plain lists, plus the largest-class index
+    # and whether the class cap changed any count.
+    sig_done = pyqtSignal(list, list, list, int, bool)
     sig_error = pyqtSignal(str)
 
-    def __init__(self, h5_path: str, scheme: str, beta: float, parent=None):
+    def __init__(self, h5_path: str, scheme: str, beta: float,
+                 max_class_ratio: float = 0.0, parent=None):
         super().__init__(parent)
         self._h5 = h5_path
         self._scheme = scheme
         self._beta = beta
+        self._ratio = max_class_ratio
 
     def run(self) -> None:
         try:
-            from src.dataset import count_labels, peek_h5_meta, SPLIT_TRAIN
+            from src.dataset import (
+                capped_counts, count_labels, peek_h5_meta, SPLIT_TRAIN,
+            )
             from src.trainer import class_weights
 
             meta = peek_h5_meta(self._h5)
             names = meta["classes"]
-            counts = count_labels(self._h5, SPLIT_TRAIN, len(names))
+            raw = count_labels(self._h5, SPLIT_TRAIN, len(names))
+            # Preview what training will actually use — the capped counts.
+            counts = capped_counts(raw, self._ratio)
             weights = class_weights(counts, scheme=self._scheme, beta=self._beta)
             self.sig_done.emit(list(names), [int(c) for c in counts],
-                               [float(w) for w in weights], int(counts.argmax()))
+                               [float(w) for w in weights], int(counts.argmax()),
+                               bool((counts != raw).any()))
         except Exception as exc:
             self.sig_error.emit(f"{type(exc).__name__}: {exc}")
 
@@ -129,6 +137,7 @@ _DEFAULTS: dict = {
     "focal_gamma":      2.0,
     "class_weight_mode": "none",
     "class_weight_beta": 0.999,
+    "max_class_ratio":  0.0,     # 0 = no limit (shown as ∞)
     "pretrained":       False,
     # Folder of pre-downloaded ImageNet weights (Models menu). Empty = let
     # torchvision download them, which needs internet access.
@@ -463,6 +472,31 @@ class SettingsPanel(QWidget):
 
         self._class_weight.currentTextChanged.connect(self._on_class_weight_changed)
         self._on_class_weight_changed(self._class_weight.currentText())
+
+        # ── Class-imbalance cap ────────────────────────────────────────────
+        # The sibling of class weighting: weighting fixes the gradient bias,
+        # this fixes the epoch-time bias. At extreme ratios (100k background
+        # vs 1k positives) most of every epoch is spent on samples the loss
+        # has already down-weighted to irrelevance.
+        self._max_class_ratio = QDoubleSpinBox()
+        self._max_class_ratio.setDecimals(1)
+        self._max_class_ratio.setRange(0.0, 10000.0)
+        self._max_class_ratio.setSingleStep(1.0)
+        self._max_class_ratio.setValue(0.0)
+        self._max_class_ratio.setSpecialValueText("∞ (no limit)")
+        self._max_class_ratio.setToolTip(
+            "Cap each class's samples per TRAINING epoch at this ratio times "
+            "the median count of the other classes.\n"
+            "A capped class contributes a fresh random subset at every "
+            "reshuffle, so over a long run the model still sees most of it — "
+            "just not all of it per epoch.\n"
+            "With 120k negatives vs 1k positives, a ratio of 10 trains on "
+            "10k negatives per epoch (~12× faster epochs).\n"
+            "Never applied to validation or test. Class weights are computed "
+            "from the capped counts.\n"
+            "0 = ∞ = no limit."
+        )
+        train_lay.addRow("Max class ratio:", self._max_class_ratio)
 
         self._lr = QDoubleSpinBox()
         self._lr.setDecimals(6)
@@ -824,18 +858,20 @@ class SettingsPanel(QWidget):
         self._btn_cw_preview.setEnabled(False)
         self._btn_cw_preview.setText("Counting…")
         self._cw_worker = _WeightPreviewWorker(
-            h5, self._class_weight.currentText(), self._cw_beta.value())
+            h5, self._class_weight.currentText(), self._cw_beta.value(),
+            self._max_class_ratio.value())
         self._cw_worker.sig_done.connect(self._on_weights_done)
         self._cw_worker.sig_error.connect(self._on_weights_error)
         self._cw_worker.start()
 
-    def _on_weights_done(self, names, counts, weights, hi) -> None:
+    def _on_weights_done(self, names, counts, weights, hi, capped) -> None:
         self._btn_cw_preview.setEnabled(True)
         self._btn_cw_preview.setText("Preview weights")
         lo = min(weights)
+        note = " (after class cap)" if capped else ""
         self._cw_label.setText(
             f"{len(weights)} classes · weights {lo:.3f}–{max(weights):.3f}\n"
-            f"largest '{names[hi]}' (n={counts[hi]}) → {weights[hi]:.3f}"
+            f"largest '{names[hi]}' (n={counts[hi]}{note}) → {weights[hi]:.3f}"
         )
 
     def _on_weights_error(self, msg: str) -> None:
@@ -942,6 +978,7 @@ class SettingsPanel(QWidget):
         idx = self._class_weight.findText(s.get("class_weight_mode", "none"))
         self._class_weight.setCurrentIndex(max(0, idx))
         self._cw_beta.setValue(float(s.get("class_weight_beta", 0.999)))
+        self._max_class_ratio.setValue(float(s.get("max_class_ratio", 0.0)))
         self._on_class_weight_changed(self._class_weight.currentText())
         self._focal_gamma.setEnabled(s.get("loss_fn", "CrossEntropy") == "FocalLoss")
         self._lr.setValue(float(s.get("lr", 1e-3)))
@@ -1013,6 +1050,7 @@ class SettingsPanel(QWidget):
             "focal_gamma":      self._focal_gamma.value(),
             "class_weight_mode": self._class_weight.currentText(),
             "class_weight_beta": self._cw_beta.value(),
+            "max_class_ratio":  self._max_class_ratio.value(),
             "lr":               self._lr.value(),
             "batch_size":       self._batch_size.value(),
             "epochs":           self._epochs.value(),

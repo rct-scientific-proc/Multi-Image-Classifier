@@ -181,6 +181,30 @@ is involved, so you can validate the core logic independently.
 
 ---
 
+## Phase 17 — Class-imbalance cap (per-epoch undersampling)
+
+- [x] `src/dataset.py` — `class_caps()` / `capped_counts()`: each class's
+      per-epoch budget is ratio × median of the OTHER classes' counts (a
+      global median never triggers in the 2-class 120k-vs-1k case; a class
+      must not set its own budget). Finite caps floor at 1 sample
+- [x] `PeriodicShuffleSampler` — optional labels + max_class_ratio; capped
+      classes contribute a fresh random subset at every reshuffle (torch RNG),
+      so the model still sees most of the big class over a run. Uncapped
+      behaviour unchanged
+- [x] `make_dataloader(max_class_ratio=…)` — honoured only when shuffle=True,
+      so validation/test can never be capped and metrics keep the real
+      distribution
+- [x] Class weights and the "Preview weights" button both use the capped
+      counts — weighting raw counts while sampling capped ones would penalise
+      the majority class twice
+- [x] Settings ▸ Optimizer ▸ "Max class ratio" — 0 renders as "∞ (no limit)"
+      (default). Training log states each cap, the epoch size, and when a
+      configured cap changes nothing
+- [x] End-to-end tested: real TrainingWorker, 2 epochs capped (36/78 samples,
+      5 batches) vs uncapped control (10 batches)
+
+---
+
 ## Suggested file structure
 
 ```

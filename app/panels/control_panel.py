@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 
 from src.augment import GpuAugment, Normalizer
 from src.dataset import (
-    H5Dataset, count_labels, make_dataloader, peek_h5_meta,
+    H5Dataset, capped_counts, count_labels, make_dataloader, peek_h5_meta,
     SPLIT_TRAIN, SPLIT_VALIDATE,
 )
 from src.checkpoints import load_checkpoint
@@ -91,11 +91,30 @@ class TrainingWorker(QThread):
                     f"per worker). If you hit 'WinError 1455 (paging file too small)', "
                     f"set num_workers=0 or increase the Windows page file."
                 )
+            max_ratio = float(s.get("max_class_ratio", 0.0))
             train_loader = make_dataloader(
                 train_ds, batch_size=s["batch_size"],
                 shuffle=True, shuffle_every=int(s.get("shuffle_every_n_epochs", 1)),
                 num_workers=nw, pin_memory=pin,
+                max_class_ratio=max_ratio,
             )
+            cap_info = getattr(train_loader.sampler, "cap_summary", [])
+            if cap_info:
+                for c, total, cap in cap_info:
+                    self.sig_log.emit(
+                        f"Class cap ({max_ratio:g}× median of others): "
+                        f"'{train_ds.classes[c]}' {total} → {cap}/epoch "
+                        f"(fresh random subset each reshuffle)"
+                    )
+                self.sig_log.emit(
+                    f"  Training epoch size: {len(train_loader.sampler)} of "
+                    f"{len(train_ds)} samples"
+                )
+            elif max_ratio > 0:
+                self.sig_log.emit(
+                    f"[INFO] Class cap {max_ratio:g}× set, but no class "
+                    f"exceeds it — nothing capped."
+                )
             val_loader = make_dataloader(
                 # 2× batch in val is safe: no gradients, no backward pass memory
                 val_ds, batch_size=s["batch_size"] * 2,
@@ -148,11 +167,16 @@ class TrainingWorker(QThread):
             cw_mode = s.get("class_weight_mode", "none")
             if cw_mode != "none":
                 counts = count_labels(s["h5_path"], SPLIT_TRAIN, num_classes)
+                # Weight what the sampler actually delivers: weighting the raw
+                # counts while training on capped ones would penalise the
+                # majority class twice.
+                counts = capped_counts(counts, max_ratio)
                 weight = class_weights(counts, scheme=cw_mode,
                                        beta=float(s.get("class_weight_beta", 0.999)))
                 hi = int(counts.argmax())
                 self.sig_log.emit(
-                    f"Class weights ({cw_mode}): range "
+                    f"Class weights ({cw_mode}"
+                    f"{', from capped counts' if cap_info else ''}): range "
                     f"{float(weight.min()):.3f}–{float(weight.max()):.3f}; "
                     f"largest class '{train_ds.classes[hi]}' (n={int(counts[hi])}) "
                     f"-> {float(weight[hi]):.3f}"
