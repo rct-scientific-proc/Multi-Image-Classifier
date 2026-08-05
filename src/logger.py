@@ -39,9 +39,10 @@ from torch.utils.tensorboard import SummaryWriter
 # Scalar keys from val_metrics to log directly (excludes list/array values)
 _VAL_SCALAR_KEYS = [
     "avg_loss", "accuracy", "top_k_accuracy",
-    "precision_macro", "precision_weighted",
-    "recall_macro",    "recall_weighted",
-    "f1_macro",        "f1_weighted",
+    "precision_macro", "precision_macro_positive", "precision_weighted",
+    "recall_macro",    "recall_macro_positive",    "recall_weighted",
+    "f1_macro",        "f1_macro_positive",        "f1_weighted",
+    "fbeta_macro",     "fbeta_macro_positive",
     "specificity_macro", "specificity_weighted",
     "mcc", "auc_macro", "auc_weighted",
 ]

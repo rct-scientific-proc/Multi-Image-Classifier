@@ -205,6 +205,42 @@ is involved, so you can validate the core logic independently.
 
 ---
 
+## Phase 18 — Positive-classes-only target metrics
+
+- [x] `f1_macro_positive` / `recall_macro_positive` / `precision_macro_positive`
+      — macro averages over only the classes with ≥1 genuine (gt=True) sample,
+      so a hard-negative bucket (one vote in four at 3 TP classes + background)
+      cannot steer best.pt selection
+- [x] `src/dataset.py` — `positive_class_mask()`: derived from the gt flag,
+      not a name convention. `MetricTracker(positive_mask=…)`; degenerate
+      masks (None / all-false / wrong length) fall back to plain macro rather
+      than NaN
+- [x] Threaded through Trainer (train + val trackers), InferenceWorker (test
+      split), TensorBoard scalars, and the target-metric dropdown; training
+      log names the excluded bucket
+- [x] Verified: hand-computed confusion (bucket recall collapse moves
+      recall_macro but not recall_macro_positive), end-to-end run selecting
+      best.pt on recall_macro_positive
+
+---
+
+## Phase 19 — Fβ target metric
+
+- [x] `fbeta_macro` / `fbeta_macro_positive` — (1+β²)·P·R / (β²·P + R) per
+      class, macro-averaged; recall counts β× as much as precision. β=1 is
+      exactly F1 (verified to 1e-12); the computed β is stored in the metrics
+      dict and hyperparams so a checkpoint's numbers are self-describing
+- [x] Settings ▸ Output ▸ "F-score β" (0.1–10, default 1.0), greyed out unless
+      an fbeta metric is the target — same pattern as focal γ. Degenerate β
+      (≤0, non-numeric) falls back to 1 rather than raising
+- [x] Threaded through Trainer, TensorBoard scalars, and InferenceWorker
+      (β replayed from the checkpoint, like recall/specificity targets)
+- [x] Note for the tests: macro-Fβ over a mix of recall-heavy and
+      precision-heavy classes is not monotone in β (F1 sits near the minimum);
+      monotonicity is per-class with R > P only
+
+---
+
 ## Suggested file structure
 
 ```

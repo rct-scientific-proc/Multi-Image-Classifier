@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
 from src.augment import GpuAugment, Normalizer
 from src.dataset import (
     H5Dataset, capped_counts, count_labels, make_dataloader, peek_h5_meta,
-    SPLIT_TRAIN, SPLIT_VALIDATE,
+    positive_class_mask, SPLIT_TRAIN, SPLIT_VALIDATE,
 )
 from src.checkpoints import load_checkpoint
 from src.logger import ExperimentLogger
@@ -182,6 +182,26 @@ class TrainingWorker(QThread):
                     f"-> {float(weight[hi]):.3f}"
                 )
 
+            # Positive classes = those with at least one genuine (gt=True)
+            # sample; a pure hard-negative bucket is excluded from the
+            # *_macro_positive metrics so it cannot vote on best.pt.
+            pos_mask = positive_class_mask(s["h5_path"], num_classes)
+            if not pos_mask.all():
+                excluded = [train_ds.classes[i] for i in range(num_classes)
+                            if not pos_mask[i]]
+                self.sig_log.emit(
+                    f"Positive-class metrics (*_macro_positive) average over "
+                    f"{int(pos_mask.sum())} of {num_classes} classes — "
+                    f"excluding: {', '.join(excluded)}"
+                )
+            elif s.get("target_metric", "").endswith("_positive"):
+                self.sig_log.emit(
+                    "[INFO] Every class has genuine samples, so the "
+                    "*_macro_positive target metric equals its plain macro "
+                    "counterpart. Mark hard negatives with gt=False in the H5 "
+                    "to exclude their bucket."
+                )
+
             os.makedirs(s["checkpoint_dir"], exist_ok=True)
             os.makedirs(s["log_dir"], exist_ok=True)
 
@@ -228,6 +248,8 @@ class TrainingWorker(QThread):
                 recall_targets=parse_target_list(s.get("recall_targets", "")),
                 specificity_targets=parse_target_list(
                     s.get("specificity_targets", "")),
+                positive_mask=pos_mask,
+                fbeta=float(s.get("fbeta", 1.0)),
                 use_amp=bool(s.get("use_amp", False)),
                 augment=augment,
                 normalizer=normalizer,

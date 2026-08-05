@@ -31,7 +31,9 @@ from PyQt5.QtWidgets import (
 
 from src.augment import Normalizer
 from src.figures import DEFAULT_FIGURES, FIGURES, FORMATS, export_figures
-from src.dataset import H5Dataset, make_dataloader, SPLIT_TEST
+from src.dataset import (
+    H5Dataset, make_dataloader, positive_class_mask, SPLIT_TEST,
+)
 from src.metrics import (
     MetricTracker, build_threshold_table, parse_target_list, to_jsonable,
     write_threshold_table,
@@ -170,9 +172,14 @@ class InferenceWorker(QThread):
             # split reports the same operating points as validation did.
             recall_t = parse_target_list(str(hp.get("recall_targets", "")))
             spec_t   = parse_target_list(str(hp.get("specificity_targets", "")))
+            # fbeta replayed from the checkpoint like the targets, so the test
+            # split's fbeta_* numbers are comparable with validation's.
             tracker   = MetricTracker(num_classes,
                                       recall_targets=recall_t,
-                                      specificity_targets=spec_t)
+                                      specificity_targets=spec_t,
+                                      positive_mask=positive_class_mask(
+                                          self._h5_path, num_classes),
+                                      fbeta=float(hp.get("fbeta", 1.0)))
             if recall_t or spec_t:
                 self.sig_log.emit(
                     f"  Thresholds at recall={recall_t or None} "

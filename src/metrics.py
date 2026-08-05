@@ -6,11 +6,26 @@ Available metrics (keys in the dict returned by compute()):
     accuracy              — overall top-1 accuracy
     top_k_accuracy        — top-k accuracy (k = min(5, num_classes))
     precision_macro       — macro-averaged precision
+    precision_macro_positive — macro precision over positive classes only
     precision_weighted    — sample-weighted precision
     recall_macro          — macro-averaged recall
+    recall_macro_positive — macro recall over positive classes only
     recall_weighted       — sample-weighted recall
     f1_macro              — macro-averaged F1
+    f1_macro_positive     — macro F1 over positive classes only
     f1_weighted           — sample-weighted F1
+    fbeta_macro           — macro-averaged Fβ (β from the tracker's fbeta)
+    fbeta_macro_positive  — macro Fβ over positive classes only
+
+The *_positive variants average over the classes in ``positive_mask`` — those
+with at least one genuine (gt=True) sample — so a hard-negative bucket class
+gets no vote. Without a mask they equal their plain macro counterparts.
+
+Fβ treats recall as β times more important than precision:
+``(1+β²)·P·R / (β²·P + R)``. β=1 reduces to F1; β=2 rewards catching and
+correctly labelling positives while barely penalising false alarms — the
+usual choice when hard negatives leaking into a positive class is the cheap
+error. True negatives appear nowhere in any F-score.
     specificity_macro     — macro-averaged specificity (TN / (TN+FP), one-vs-rest)
     specificity_weighted  — sample-weighted specificity
     mcc                   — Matthews Correlation Coefficient
@@ -62,10 +77,15 @@ import torch
 TARGET_METRICS = [
     "accuracy",
     "f1_macro",
+    "f1_macro_positive",
     "f1_weighted",
+    "fbeta_macro",
+    "fbeta_macro_positive",
     "precision_macro",
+    "precision_macro_positive",
     "precision_weighted",
     "recall_macro",
+    "recall_macro_positive",
     "recall_weighted",
     "specificity_macro",
     "specificity_weighted",
@@ -188,7 +208,9 @@ class MetricTracker:
 
     def __init__(self, num_classes: int, recall_targets: list[float] | None = None,
                  score_bins: int = SCORE_BINS,
-                 specificity_targets: list[float] | None = None):
+                 specificity_targets: list[float] | None = None,
+                 positive_mask: "list[bool] | np.ndarray | None" = None,
+                 fbeta: float = 1.0):
         self.num_classes    = num_classes
         self._top_k         = min(5, num_classes)
         self._bins          = max(2, int(score_bins))
@@ -196,6 +218,24 @@ class MetricTracker:
                                       if 0.0 < float(r) <= 1.0})
         self.specificity_targets = sorted({float(s) for s in (specificity_targets or [])
                                            if 0.0 < float(s) <= 1.0})
+        # Which classes count in the *_macro_positive metrics — typically the
+        # genuine-object classes, with a hard-negative bucket excluded so it
+        # cannot vote on checkpoint selection. None, a wrong-length mask, or a
+        # mask keeping nothing all degrade to "every class", making the
+        # positive metrics equal their plain macro counterparts rather than
+        # NaN — a hand-edited dataset must not break best.pt selection.
+        mask = None
+        if positive_mask is not None:
+            arr = np.asarray(positive_mask, dtype=bool).flatten()
+            if len(arr) == num_classes and arr.any():
+                mask = arr
+        self.positive_mask = mask
+        # β for the fbeta_* metrics; anything unusable degrades to 1 (= F1)
+        # rather than raising, for the same reason as the mask above.
+        try:
+            self.fbeta = float(fbeta) if float(fbeta) > 0 else 1.0
+        except (TypeError, ValueError):
+            self.fbeta = 1.0
         self.reset()
 
     def reset(self):
@@ -303,6 +343,24 @@ class MetricTracker:
         f1_macro           = float(f1_c.mean())
         specificity_macro  = float(specificity_c.mean())
 
+        # ---- positive-classes-only macro averages ----
+        # Same per-class values, averaged over the positive classes only. With
+        # one giant hard-negative bucket among few genuine classes, the plain
+        # macro gives that bucket a full vote in best.pt selection even though
+        # its recall is not what anyone is optimising. No mask = all classes.
+        pos = self.positive_mask if self.positive_mask is not None \
+            else np.ones(self.num_classes, dtype=bool)
+        precision_macro_positive = float(precision_c[pos].mean())
+        recall_macro_positive    = float(recall_c[pos].mean())
+        f1_macro_positive        = float(f1_c[pos].mean())
+
+        # ---- Fβ: recall counts β× as much as precision ----
+        b2 = self.fbeta ** 2
+        fbeta_c = ((1 + b2) * precision_c * recall_c
+                   / np.maximum(b2 * precision_c + recall_c, 1e-9))
+        fbeta_macro          = float(fbeta_c.mean())
+        fbeta_macro_positive = float(fbeta_c[pos].mean())
+
         # ---- weighted averages ----
         w = support.astype(float) / float(max(support.sum(), 1))
         precision_weighted   = float((precision_c   * w).sum())
@@ -364,11 +422,17 @@ class MetricTracker:
             "accuracy":             accuracy,
             "top_k_accuracy":       top_k_accuracy,
             "precision_macro":      precision_macro,
+            "precision_macro_positive": precision_macro_positive,
             "precision_weighted":   precision_weighted,
             "recall_macro":         recall_macro,
+            "recall_macro_positive": recall_macro_positive,
             "recall_weighted":      recall_weighted,
             "f1_macro":             f1_macro,
+            "f1_macro_positive":    f1_macro_positive,
             "f1_weighted":          f1_weighted,
+            "fbeta_macro":          fbeta_macro,
+            "fbeta_macro_positive": fbeta_macro_positive,
+            "fbeta":                self.fbeta,
             "specificity_macro":    specificity_macro,
             "specificity_weighted": specificity_weighted,
             "mcc":                  mcc,

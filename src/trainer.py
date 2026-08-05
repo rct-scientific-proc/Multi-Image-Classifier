@@ -135,6 +135,8 @@ class Trainer:
         criterion: nn.Module | None = None,
         recall_targets: list[float] | None = None,
         specificity_targets: list[float] | None = None,
+        positive_mask: "list[bool] | None" = None,
+        fbeta: float = 1.0,
         use_amp: bool = False,
         augment: "GpuAugment | None" = None,
         normalizer: "Normalizer | None" = None,
@@ -170,6 +172,10 @@ class Trainer:
         self.recall_targets = list(recall_targets) if recall_targets else []
         self.specificity_targets = (list(specificity_targets)
                                     if specificity_targets else [])
+        # Which classes the *_macro_positive metrics average over (see
+        # src/dataset.positive_class_mask). None = all classes.
+        self.positive_mask = positive_mask
+        self.fbeta = float(fbeta)
         # AMP is only meaningful on CUDA; silently disable elsewhere
         self.use_amp       = bool(use_amp) and str(device).startswith("cuda")
         self._scaler       = torch.amp.GradScaler("cuda", enabled=self.use_amp)
@@ -224,7 +230,9 @@ class Trainer:
             self.augment.train()          # matches the module's own eval guard
         tracker = MetricTracker(self._num_classes,
                                  recall_targets=self.recall_targets,
-                                 specificity_targets=self.specificity_targets)
+                                 specificity_targets=self.specificity_targets,
+                                 positive_mask=self.positive_mask,
+                                 fbeta=self.fbeta)
 
         for batch_idx, (images, labels, _gt) in enumerate(self.train_loader):
             if self.cancel_event.is_set():
@@ -263,7 +271,9 @@ class Trainer:
             self.augment.eval()           # belt and braces; not called below
         tracker = MetricTracker(self._num_classes,
                                  recall_targets=self.recall_targets,
-                                 specificity_targets=self.specificity_targets)
+                                 specificity_targets=self.specificity_targets,
+                                 positive_mask=self.positive_mask,
+                                 fbeta=self.fbeta)
 
         for images, labels, _gt in self.val_loader:
             images = images.to(self.device, non_blocking=True)

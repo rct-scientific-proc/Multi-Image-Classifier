@@ -53,6 +53,24 @@ def peek_h5_meta(h5_path: str) -> dict:
     }
 
 
+def positive_class_mask(h5_path: str, num_classes: int) -> np.ndarray:
+    """Boolean mask of classes holding at least one genuine (gt=True) sample.
+
+    This is what defines "positive" for the *_macro_positive metrics: a class
+    made up entirely of hard negatives (the background bucket) is excluded
+    from the average, so it cannot vote on which epoch becomes best.pt.
+    Derived from the data rather than a name convention — nothing forces the
+    bucket to be called "background". Reads only the small labels/gt arrays.
+    """
+    with h5py.File(h5_path, "r") as f:
+        labels = f["labels"][:].astype(np.int64)
+        gt     = f["gt"][:].astype(bool)
+    mask = np.zeros(num_classes, dtype=bool)
+    genuine = np.unique(labels[gt])
+    mask[genuine[genuine < num_classes]] = True
+    return mask
+
+
 def count_labels(h5_path: str, split: int | None, num_classes: int) -> np.ndarray:
     """Ground-truth sample count per class for *split* (None = all splits).
 

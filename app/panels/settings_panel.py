@@ -143,6 +143,7 @@ _DEFAULTS: dict = {
     # torchvision download them, which needs internet access.
     "weights_dir":      "",
     "target_metric":    DEFAULT_TARGET_METRIC,
+    "fbeta":            1.0,
     "device":           "cuda" if torch.cuda.is_available() else "cpu",
     "checkpoint_dir":   "checkpoints",
     "log_dir":          "runs",
@@ -663,9 +664,36 @@ class SettingsPanel(QWidget):
         self._target_metric.addItems(TARGET_METRICS)
         self._target_metric.setCurrentText(DEFAULT_TARGET_METRIC)
         self._target_metric.setToolTip(
-            "Metric used to decide which epoch becomes best.pt."
+            "Metric used to decide which epoch becomes best.pt.\n"
+            "*_macro_positive variants average only over classes with genuine "
+            "(gt=True) samples, so a hard-negative bucket class gets no vote — "
+            "use these when the background class's own recall is not what you "
+            "are optimising."
         )
         out_lay.addRow("Target metric:", self._target_metric)
+
+        self._fbeta = QDoubleSpinBox()
+        self._fbeta.setDecimals(1)
+        self._fbeta.setRange(0.1, 10.0)
+        self._fbeta.setSingleStep(0.5)
+        self._fbeta.setValue(1.0)
+        self._fbeta.setToolTip(
+            "β for the fbeta_macro / fbeta_macro_positive metrics: recall "
+            "counts β× as much as precision.\n"
+            "  β = 1  — balanced (identical to F1)\n"
+            "  β = 2  — catching and correctly labelling positives matters "
+            "twice as much as false alarms\n"
+            "  β = 0.5 — false alarms are the expensive error\n"
+            "Only affects the fbeta_* metrics; the checkpoint records the β "
+            "its numbers were computed with."
+        )
+        out_lay.addRow("F-score β:", self._fbeta)
+        # Grey it out unless an fbeta metric is actually steering best.pt —
+        # same pattern as focal γ, which only lights up for FocalLoss.
+        self._target_metric.currentTextChanged.connect(
+            lambda t: self._fbeta.setEnabled(t.startswith("fbeta")))
+        self._fbeta.setEnabled(
+            self._target_metric.currentText().startswith("fbeta"))
 
         self._recall_targets = QLineEdit("0.95, 0.99")
         self._recall_targets.setPlaceholderText("e.g. 0.90, 0.95, 0.99 — leave blank to disable")
@@ -1003,6 +1031,9 @@ class SettingsPanel(QWidget):
         self._use_amp.setChecked(bool(s.get("use_amp", torch.cuda.is_available())))
         idx = self._target_metric.findText(s.get("target_metric", DEFAULT_TARGET_METRIC))
         self._target_metric.setCurrentIndex(max(0, idx))
+        self._fbeta.setValue(float(s.get("fbeta", 1.0)))
+        self._fbeta.setEnabled(
+            self._target_metric.currentText().startswith("fbeta"))
         device_data = s.get("device", "cpu")
         idx = self._device.findData(device_data)
         if idx < 0:  # fall back: map bare "cuda" → first cuda entry
@@ -1069,6 +1100,7 @@ class SettingsPanel(QWidget):
             "recall_targets":   self._recall_targets.text().strip(),
             "specificity_targets": self._specificity_targets.text().strip(),
             "target_metric":    self._target_metric.currentText(),
+            "fbeta":            self._fbeta.value(),
             "device":           self._device.currentData(),
             "resume_checkpoint": self._resume_edit.text().strip(),
             "checkpoint_dir":   self._checkpoint_dir.text().strip(),
